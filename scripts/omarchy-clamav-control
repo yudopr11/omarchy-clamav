@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import pwd
 import stat
 import subprocess
 import sys
@@ -81,6 +82,26 @@ def replacements(kind, data):
     raise ValueError('Unknown configuration operation')
 
 
+def scanner_setup(text):
+    parsed = directives(text)
+    users = parsed.get('User', ['clamav'])
+    if len(users) != 1 or not re.fullmatch(r'[a-z_][a-z0-9_-]{0,31}', users[0]):
+        raise ValueError('Daemon User must be one validated system account')
+    try:
+        uid = pwd.getpwnam(users[0]).pw_uid
+    except KeyError:
+        raise ValueError('Daemon account does not exist; install ClamAV first') from None
+    if not 0 < uid < 1000:
+        raise ValueError('Refusing to exclude root or a login account; daemon User must be a non-root system account')
+    changes = {}
+    names = parsed.get('OnAccessExcludeUname', [])
+    if users[0] not in names and str(uid) not in parsed.get('OnAccessExcludeUID', []):
+        changes['OnAccessExcludeUname'] = names + users
+    if 'User' not in parsed:
+        changes['User'] = users
+    return changes
+
+
 def render(text, changes):
     kept = [line for line in text.splitlines(keepends=True)
             if not line.strip().split(None, 1) or line.strip().split(None, 1)[0] not in changes]
@@ -126,8 +147,10 @@ def apply_config(kind, data, expected):
     text, info = read_config(path)
     if revision(text) != expected:
         raise ValueError('Config changed since loading; reload before applying')
-    if 'Example' in directives(text):
-        raise ValueError('Remove the Example directive using administrator setup first')
+    if kind == 'scanner':
+        changes.update(scanner_setup(text))
+    # Explicit authenticated apply completes package-example setup, never on read/start.
+    changes['Example'] = []
     candidate = render(text, changes)
     if candidate == text:
         return {'message': 'No changes'}
@@ -173,19 +196,22 @@ def service(kind, action):
     else:
         units = [UNITS[kind]]
     checked(['/usr/bin/systemctl', action] + units)
-    return {'message': 'Completed ' + action + '. Refreshing actual state; runtime and boot settings are separate.'}
+    return {'message': ('Start request accepted, not a health verdict. Check refreshed service state and diagnostics; a service can exit immediately.'
+                        if action == 'start' else 'Completed ' + action + '. Refreshing actual state; runtime and boot settings are separate.')}
 
 
 def status():
     result = {'sampledAt': int(time.time()), 'services': {}, 'configs': {}, 'errors': []}
     for key, unit in UNITS.items():
         try:
-            raw = checked(['/usr/bin/systemctl', 'show', unit, '--property=LoadState,ActiveState,UnitFileState,ExecStart'])
+            raw = checked(['/usr/bin/systemctl', 'show', unit, '--property=LoadState,ActiveState,UnitFileState,ExecStart,Result,ExecMainStatus'])
             fields = dict(line.split('=', 1) for line in raw.splitlines() if '=' in line)
             known = fields.get('LoadState') == 'loaded'
             result['services'][key] = {'active': fields.get('ActiveState') if known else 'unknown',
                 'boot': fields.get('UnitFileState') if known else 'unknown',
-                'policy': fields.get('ExecStart', '')[:4096] if key == 'scanner' else ''}
+                'policy': fields.get('ExecStart', '')[:4096] if key == 'scanner' else '',
+                'diagnostic': ('Result: ' + fields.get('Result', 'unknown')
+                               + '; exit status: ' + fields.get('ExecMainStatus', 'unknown'))[:512]}
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             result['services'][key] = {'active': 'unknown', 'boot': 'unknown', 'policy': ''}
             result['errors'].append(str(error))
@@ -200,6 +226,25 @@ def status():
             else:
                 values = {'checks': parsed.get('Checks', ['12'])[-1]}
             result['configs'][kind] = {'revision': revision(text), 'values': values}
+            prerequisites = []
+            if 'Example' in parsed:
+                prerequisites.append('Package Example directive: Apply removes it after validation.')
+            if kind == 'scanner':
+                exclusions = {key: parsed[key] for key in ('OnAccessExcludeUID', 'OnAccessExcludeUname', 'OnAccessExcludeRootUID') if key in parsed}
+                prerequisites.append('Existing user exclusions: ' + json.dumps(exclusions)
+                                     + ' (preserved; not proof that the daemon is excluded)')
+                if not values['include']:
+                    prerequisites.append('Choose at least one watched directory and Apply before starting scanner.')
+                try:
+                    added = scanner_setup(text)
+                    if added:
+                        prerequisites.append('Apply will add daemon exclusion: ' + added['OnAccessExcludeUname'][-1]
+                                             if 'OnAccessExcludeUname' in added else 'Daemon already excluded.')
+                        if 'User' in added:
+                            prerequisites.append('Apply will set missing User to clamav')
+                except ValueError as error:
+                    prerequisites.append(str(error))
+            result['configs'][kind]['setup'] = prerequisites
         except (OSError, ValueError) as error:
             result['errors'].append(filename + ': ' + str(error))
     return result

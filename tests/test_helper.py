@@ -25,11 +25,80 @@ class HelperTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(dir=ROOT / 'tests')
         self.addCleanup(self.temp.cleanup)
         self.folder = Path(self.temp.name)
-        self.scanner = (ROOT / 'tests/fixtures/clamd.conf').read_text()
+        self.scanner = (ROOT / 'tests/fixtures/clamd.conf').read_text() + 'OnAccessExcludeUname clamav\n'
         self.updater = (ROOT / 'tests/fixtures/freshclam.conf').read_text()
         (self.folder / 'clamd.conf').write_text(self.scanner)
         (self.folder / 'freshclam.conf').write_text(self.updater)
         self.data = {'include': [str(self.folder)], 'exclude': [], 'maxSize': '20M'}
+
+    def test_first_setup_and_exclusion_preservation(self):
+        account = types.SimpleNamespace(pw_uid=64)
+        with patch.object(control.pwd, 'getpwnam', return_value=account):
+            for text in ['', 'User clamav\n', 'User antivirus\n']:
+                with self.subTest(text=text):
+                    changes = control.scanner_setup(text)
+                    expected = {'OnAccessExcludeUname': [control.directives(text).get('User', ['clamav'])[0]]}
+                    if not text:
+                        expected['User'] = ['clamav']
+                    self.assertEqual(changes, expected)
+            for exclusion in ['OnAccessExcludeUID 64', 'OnAccessExcludeUname clamav']:
+                self.assertEqual(control.scanner_setup(exclusion + '\nUser clamav\n'), {})
+                self.assertEqual(control.scanner_setup(exclusion + '\n'), {'User': ['clamav']})
+            for exclusion in ['OnAccessExcludeUID 123', 'OnAccessExcludeUname other', 'OnAccessExcludeRootUID yes']:
+                changes = control.scanner_setup(exclusion + '\nUser clamav\n')
+                self.assertEqual(changes['OnAccessExcludeUname'][-1], 'clamav')
+                output = control.render(exclusion + '\nUser clamav\n', changes)
+                self.assertIn(exclusion + '\n', output)
+                self.assertEqual(control.scanner_setup(output), {})
+        for text in ['User root\n', 'User bad/name\n', 'User clamav\nUser other\n']:
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                control.scanner_setup(text)
+        for uid in [0, 1000]:
+            with patch.object(control.pwd, 'getpwnam', return_value=types.SimpleNamespace(pw_uid=uid)), self.assertRaises(ValueError):
+                control.scanner_setup('User clamav\n')
+        with patch.object(control.pwd, 'getpwnam', side_effect=KeyError), self.assertRaisesRegex(ValueError, 'account'):
+            control.scanner_setup('')
+        with patch.object(control.pwd, 'getpwnam', return_value=account):
+            self.assertEqual(control.scanner_setup('OnAccessExcludeRootUID no\n'), {'OnAccessExcludeUname': ['clamav'], 'User': ['clamav']})
+
+    def test_pristine_apply_adds_exclusion_without_starting_services(self):
+        path = self.folder / 'clamd.conf'
+        text = '# packaged defaults\nLocalSocket /run/clamav/clamd.ctl\n'
+        path.write_text(text)
+        with patch.object(control, 'CONFIG', self.folder), patch.object(control, 'read_config', side_effect=self.config_read), patch.object(control, 'validate_candidate'), patch.object(control.pwd, 'getpwnam', return_value=types.SimpleNamespace(pw_uid=64)), patch.object(control, 'run') as run:
+            control.apply_config('scanner', self.data, control.revision(text))
+            run.assert_not_called()
+        parsed = control.directives(path.read_text())
+        self.assertEqual(parsed['OnAccessExcludeUname'], ['clamav'])
+        self.assertEqual(parsed['User'], ['clamav'])
+        self.assertEqual(parsed['OnAccessIncludePath'], self.data['include'])
+        self.assertEqual(parsed['LocalSocket'], ['/run/clamav/clamd.ctl'])
+
+    def test_start_is_accepted_not_claimed_healthy_after_immediate_exit(self):
+        with patch.object(control, 'run', return_value=completed()):
+            self.assertIn('accepted', control.service('scanner', 'start')['message'])
+        raw = 'LoadState=loaded\nActiveState=failed\nResult=exit-code\nExecMainStatus=2\n'
+        with patch.object(control, 'checked', return_value=raw), patch.object(control, 'read_config', side_effect=PermissionError):
+            state = control.status()['services']['scanner']
+        self.assertEqual(state['active'], 'failed')
+        self.assertIn('exit-code', state['diagnostic'])
+        self.assertIn('2', state['diagnostic'])
+
+    def test_status_setup_prerequisites_and_blockers(self):
+        for text, expected in [
+                ('Example\n', 'Package Example'),
+                ('User missing\n', 'account does not exist'),
+                ('User clamav\n', 'Apply will add daemon exclusion: clamav'),
+                ('OnAccessExcludeUID 64\n', 'set missing User to clamav'),
+                ('OnAccessExcludeUname clamav\nUser clamav\n', 'Existing user exclusions:')]:
+            with self.subTest(text=text), patch.object(control, 'checked', return_value=''), patch.object(control, 'read_config', return_value=(text, None)), patch.object(control.pwd, 'getpwnam', side_effect=KeyError if 'missing' in text else None, return_value=types.SimpleNamespace(pw_uid=64)):
+                setup = control.status()['configs']['scanner']['setup']
+                self.assertTrue(any(expected in line for line in setup), setup)
+                self.assertTrue(any('watched directory' in line for line in setup))
+
+    def test_nonstart_service_message(self):
+        with patch.object(control, 'run', return_value=completed()):
+            self.assertIn('Completed stop', control.service('updater', 'stop')['message'])
 
     def test_parse_repeated_and_comments(self):
         parsed = control.directives(self.scanner)
@@ -164,13 +233,14 @@ class HelperTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'rejected'):
                 control.validate_candidate('clamd.conf', invalid)
 
-    def test_example_config_refused(self):
+    def test_example_config_removed_only_on_explicit_apply(self):
         path = self.folder / 'clamd.conf'
         text = self.scanner + 'Example\n'
         path.write_text(text)
-        with patch.object(control, 'CONFIG', self.folder), patch.object(control, 'read_config', side_effect=self.config_read):
-            with self.assertRaisesRegex(ValueError, 'Example'):
-                control.apply_config('scanner', self.data, control.revision(text))
+        with patch.object(control, 'CONFIG', self.folder), patch.object(control, 'read_config', side_effect=self.config_read), patch.object(control, 'validate_candidate'):
+            result = control.apply_config('scanner', self.data, control.revision(text))
+        self.assertNotIn('Example', control.directives(path.read_text()))
+        self.assertEqual(Path(result['backup']).read_text(), text)
 
     def test_read_config_rejects_untrusted_owner_symlink_fifo(self):
         # No root required: mock only the parent ownership to reach file checks.
@@ -230,7 +300,7 @@ class HelperTests(unittest.TestCase):
         with patch.object(control, 'checked', return_value=raw), patch.object(control, 'read_config', return_value=('', None)):
             result = control.status()
         self.assertEqual(result['errors'], [])
-        self.assertEqual(result['services']['scanner'], {'active': 'active', 'boot': 'enabled', 'policy': 'scan --move=/quarantine'})
+        self.assertEqual(result['services']['scanner'], {'active': 'active', 'boot': 'enabled', 'policy': 'scan --move=/quarantine', 'diagnostic': 'Result: unknown; exit status: unknown'})
         self.assertEqual(result['services']['daemon']['policy'], '')
         self.assertEqual(result['configs']['scanner']['values'], {'include': [], 'exclude': [], 'maxSize': '5M'})
         self.assertEqual(result['configs']['updater']['values'], {'checks': '12'})

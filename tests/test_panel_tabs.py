@@ -23,6 +23,17 @@ class PanelTabsTests(unittest.TestCase):
             self.assertIn('"' + page + '": [' + ', '.join(controls) + ']', source)
         self.assertIn('pageItems[tab].filter(function(item) { return item.visible && item.enabled })', source)
 
+    def test_setup_guidance_and_failure_diagnostics(self):
+        source = PANEL.read_text()
+        self.assertIn('1. Install ClamAV', source)
+        self.assertIn('2. Install / update control helper', source)
+        self.assertIn('3. Settings', source)
+        self.assertIn('4. Services', source)
+        self.assertIn('root.state.configs.scanner.setup', source)
+        self.assertIn('root.serviceState("scanner").diagnostic', source)
+        self.assertIn('daemon exclusion only when absent', source)
+        self.assertIn('root.state.configs.updater.setup', source)
+
     def test_navigation_and_confirmation(self):
         source = PANEL.read_text()
         start = source.index('function setTab(')

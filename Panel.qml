@@ -356,6 +356,7 @@ Panel {
             spacing: Style.space(8)
             visible: root.tab === "overview"
             Button { id: refreshButton; hasCursor: root.cursorItems[root.cursor] === refreshButton; width: parent.width; text: "Refresh status"; focusable: true; onClicked: root.refresh() }
+            Label { text: "1. Install ClamAV below.\n2. Install / update control helper (required after plugin updates).\n3. Settings: choose watched directories, review exclusions, Apply scanner setup; Apply updater settings if using package examples.\n4. Services: start updater first and allow database download, then start daemon/scanner after reviewing existing policy. Boot enablement is optional and separate. Nothing starts automatically." }
             Label { text: "ClamAV package: " + root.packageState }
             Button { id: installButton; visible: root.packageState === "absent"; width: parent.width; text: "Install ClamAV (Omarchy installer)"; focusable: true; hasCursor: root.cursorItems[root.cursor] === installButton; enabled: !packageInstallProc.running; onClicked: packageInstallProc.running = true }
             Button { id: helperInstallButton; width: parent.width; text: "Install / update control helper"; focusable: true; hasCursor: root.cursorItems[root.cursor] === helperInstallButton; enabled: !helperInstallProc.running; onClicked: helperInstallProc.running = true }
@@ -389,6 +390,7 @@ Panel {
             Action { id: daemonBoot; serviceKind: "daemon"; operation: "enable"; text: "Enable daemon + socket at boot"; onClicked: root.serviceAction("daemon", "enable") }
             Action { id: daemonDisableBoot; serviceKind: "daemon"; operation: "disable"; text: "Disable scanner + daemon + socket at boot"; onClicked: root.serviceAction("daemon", "disable") }
             Label { text: "Scanner: " + (root.stale ? "unknown" : root.serviceState("scanner").active + " / " + root.serviceState("scanner").boot) }
+            Label { text: root.stale ? "Diagnostics unavailable/stale" : "Scanner: " + (root.serviceState("scanner").diagnostic || "Update helper for diagnostics") + "\nDaemon: " + (root.serviceState("daemon").diagnostic || "unknown") + "\nUpdater: " + (root.serviceState("updater").diagnostic || "unknown") }
             Action { id: scannerStart; serviceKind: "scanner"; operation: "start"; text: "Start on-access scanner + dependencies"; onClicked: root.serviceAction("scanner", "start") }
             Action { id: scannerStop; serviceKind: "scanner"; operation: "stop"; text: "Stop on-access scanner (daemon/socket remain)"; onClicked: root.serviceAction("scanner", "stop") }
             Action { id: scannerBoot; serviceKind: "scanner"; operation: root.bootAction("scanner"); text: root.bootAction("scanner") + " scanner at boot"; enabled: !root.stale && !root.busy && !root.confirmation && root.bootKnown("scanner"); onClicked: root.serviceAction("scanner", root.bootAction("scanner")) }
@@ -405,14 +407,17 @@ Panel {
             Button { id: reloadButton; hasCursor: root.cursorItems[root.cursor] === reloadButton; width: parent.width; text: "Reload fields (discard unsaved edits)"; focusable: true; enabled: !root.busy; onClicked: { root.scannerDirty = false; root.updaterDirty = false; root.loadFields() } }
             PanelSectionHeader { text: "ON-ACCESS CONFIGURATION"; foreground: root.foreground; fontFamily: root.fontFamily }
             Label { text: "Include/exclude: JSON arrays of existing absolute directories, e.g. [\"/home\"]. Apply saves only; stop scanner+daemon, then start daemon and scanner to use new settings. Backups remain next to the config." }
+            Label { text: "Authenticated Apply adds a validated non-root system daemon exclusion only when absent for that daemon; existing UID/Uname/root exclusions and quarantine policy are preserved. A root-only exclusion does not cover a non-root daemon. Missing User is set to the validated clamav default. It removes an active package Example directive after candidate validation. No services start automatically." }
+            Label { text: root.state.configs.scanner && root.state.configs.scanner.setup ? root.state.configs.scanner.setup.join("\n") : "Install / update control helper on Overview to load setup prerequisites." }
             Label { text: "Include paths" }
             TextField { id: includeField; property string revision: ""; width: parent.width; enabled: !!root.state.configs.scanner && !root.busy; onTextEdited: root.scannerDirty = true; Keys.onEscapePressed: keys.forceActiveFocus() }
             Label { text: "Exclude paths" }
             TextField { id: excludeField; width: parent.width; enabled: includeField.enabled; onTextEdited: root.scannerDirty = true; Keys.onEscapePressed: keys.forceActiveFocus() }
             Label { text: "Maximum on-access size (bytes or K/M/G; 1 byte–4G)" }
             TextField { id: sizeField; width: parent.width; enabled: includeField.enabled; onTextEdited: root.scannerDirty = true; Keys.onEscapePressed: keys.forceActiveFocus() }
-            Action { id: saveScanner; text: "Apply scanner settings (authenticate)"; enabled: includeField.enabled && !root.stale && !root.confirmation; onClicked: root.save("scanner") }
-            Label { text: "freshclam checks per day (1–50). Restart updater after applying." }
+            Action { id: saveScanner; text: "Apply scanner setup / settings (authenticate)"; enabled: includeField.enabled && !root.stale && !root.confirmation; onClicked: root.save("scanner") }
+            Label { text: root.state.configs.updater && root.state.configs.updater.setup ? root.state.configs.updater.setup.join("\n") : "" }
+            Label { text: "freshclam checks per day (1–50). Apply also completes package Example setup. Restart updater after applying; initial database downloads may take time. Start scanner only after databases are ready." }
             TextField { id: checksField; property string revision: ""; width: parent.width; enabled: !!root.state.configs.updater && !root.busy; onTextEdited: root.updaterDirty = true; Keys.onEscapePressed: keys.forceActiveFocus() }
             Action { id: saveUpdater; text: "Apply update frequency (authenticate)"; enabled: checksField.enabled && !root.stale && !root.confirmation; onClicked: root.save("updater") }
           } // End settings
