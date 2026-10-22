@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.yudopr11.omarchy-clamav-control",
+  "name": "ClamAV Control",
+  "version": "0.1.0",
+  "author": "yudopr11",
+  "license": "MIT",
+  "homepage": "https://github.com/yudopr11/omarchy-clamav",
+  "description": "Monitor ClamAV and manage scanner, updater and on-access settings.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "ClamAV",
+    "description": "ClamAV monitoring and authenticated controls",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": { "refreshIntervalSec": 60 },
+    "schema": [
+      { "key": "refreshIntervalSec", "type": "integer", "label": "Background refresh (seconds)", "min": 10, "max": 600, "step": 10, "defaultValue": 60 }
+    ]
+  }
+}

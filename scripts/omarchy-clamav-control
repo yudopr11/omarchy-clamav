@@ -1,0 +1,244 @@
+#!/usr/bin/python3 -I
+"""Narrow installed ClamAV control boundary. No environment/path overrides."""
+import contextlib
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+
+CONFIG = Path('/etc/clamav')
+UNITS = {'daemon': 'clamav-daemon.service', 'scanner': 'clamav-clamonacc.service',
+         'updater': 'clamav-freshclam.service', 'socket': 'clamav-daemon.socket'}
+FILES = {'scanner': 'clamd.conf', 'updater': 'freshclam.conf'}
+KEYS = {'scanner': ('OnAccessIncludePath', 'OnAccessExcludePath', 'OnAccessMaxFileSize'),
+        'updater': ('Checks',)}
+ENV = {'PATH': '/usr/bin:/bin', 'LANG': 'C', 'LC_ALL': 'C'}
+
+
+def run(args):
+    return subprocess.run(args, capture_output=True, text=True, timeout=45, env=ENV)
+
+
+def checked(args):
+    result = run(args)
+    if result.returncode:
+        raise ValueError((result.stderr or result.stdout or 'Command failed').strip()[:2000])
+    return result.stdout
+
+
+def directives(text):
+    result = {}
+    for line in text.splitlines():
+        parts = line.strip().split(None, 1)
+        if parts and not parts[0].startswith('#'):
+            result.setdefault(parts[0], []).append(parts[1].strip() if len(parts) > 1 else '')
+    return result
+
+
+def paths(values):
+    if not isinstance(values, list) or len(values) > 64:
+        raise ValueError('Use at most 64 paths')
+    for value in values:
+        if (not isinstance(value, str) or not value.startswith('/') or len(value) > 1024
+                or any(ord(c) < 32 or ord(c) == 127 or c in '#"\\' for c in value)
+                or value != os.path.normpath(value) or value.startswith('//')):
+            raise ValueError('Paths must be normalized absolute paths without controls, quotes, # or backslashes')
+        if not Path(value).is_dir():
+            raise ValueError('Directory does not exist: ' + value)
+    if len(set(values)) != len(values):
+        raise ValueError('Duplicate paths')
+    return values
+
+
+def replacements(kind, data):
+    if kind == 'scanner':
+        if set(data) != {'include', 'exclude', 'maxSize'}:
+            raise ValueError('Expected include, exclude, maxSize')
+        include, exclude = paths(data['include']), paths(data['exclude'])
+        if not include:
+            raise ValueError('At least one include directory is required')
+        if set(include) & set(exclude):
+            raise ValueError('A directory cannot be both included and excluded')
+        size = data['maxSize']
+        if not isinstance(size, str) or not re.fullmatch(r'[1-9][0-9]{0,8}[KMG]?', size):
+            raise ValueError('Size must be a positive integer with optional K, M or G suffix')
+        factor = {'K': 1024, 'M': 1024**2, 'G': 1024**3}.get(size[-1], 1)
+        if int(size[:-1] if factor != 1 else size) * factor > 4 * 1024**3:
+            raise ValueError('Maximum size is 4G')
+        return dict(zip(KEYS[kind], [include, exclude, [size]]))
+    if kind == 'updater' and set(data) == {'checks'}:
+        checks = data['checks']
+        if type(checks) is not int or not 1 <= checks <= 50:
+            raise ValueError('Checks must be an integer from 1 to 50 per day')
+        return {'Checks': [str(checks)]}
+    raise ValueError('Unknown configuration operation')
+
+
+def render(text, changes):
+    kept = [line for line in text.splitlines(keepends=True)
+            if not line.strip().split(None, 1) or line.strip().split(None, 1)[0] not in changes]
+    body = ''.join(kept)
+    if body and not body.endswith('\n'):
+        body += '\n'
+    return body + ''.join(key + ' ' + value + '\n' for key, values in changes.items() for value in values)
+
+
+def read_config(path):
+    parent = path.parent.stat()
+    if path.parent.is_symlink() or parent.st_uid != 0 or parent.st_mode & 0o022:
+        raise ValueError('Unsafe config directory')
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, 'r') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+            raise ValueError('Config must be a root-owned regular file, not group/world writable')
+        text = stream.read(1024 * 1024 + 1)
+        if len(text) > 1024 * 1024:
+            raise ValueError('Config too large')
+    return text, info
+
+
+def revision(text):
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def validate_candidate(filename, text):
+    # clamconf parses the candidate before any live file is replaced.
+    with tempfile.TemporaryDirectory(prefix='omarchy-clamav-') as folder:
+        os.chmod(folder, 0o700)
+        Path(folder, filename).write_text(text)
+        result = run(['/usr/bin/clamconf', '-c', folder])
+        output = result.stdout + result.stderr
+        if result.returncode or re.search(r'^ERROR:', output, re.M):
+            raise ValueError('ClamAV rejected candidate: ' + output[-2000:])
+
+
+def apply_config(kind, data, expected):
+    changes = replacements(kind, data)
+    path = CONFIG / FILES[kind]
+    text, info = read_config(path)
+    if revision(text) != expected:
+        raise ValueError('Config changed since loading; reload before applying')
+    if 'Example' in directives(text):
+        raise ValueError('Remove the Example directive using administrator setup first')
+    candidate = render(text, changes)
+    if candidate == text:
+        return {'message': 'No changes'}
+    validate_candidate(path.name, candidate)
+    backup = path.with_name(path.name + '.omarchy-' + str(time.time_ns()) + '.bak')
+    with os.fdopen(os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as stream:
+        stream.write(text)
+        stream.flush()
+        os.fsync(stream.fileno())
+    fd, temporary = tempfile.mkstemp(prefix='.omarchy-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w') as stream:
+            os.fchown(stream.fileno(), info.st_uid, info.st_gid)
+            os.fchmod(stream.fileno(), stat.S_IMODE(info.st_mode))
+            stream.write(candidate)
+            stream.flush()
+            os.fsync(stream.fileno())
+        current, current_info = read_config(path)
+        if current != text or (current_info.st_dev, current_info.st_ino, current_info.st_mode, current_info.st_uid, current_info.st_gid) != (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid):
+            raise ValueError('Config changed before replacement; reload and retry')
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    return {'message': 'Saved. Restart ' + ('scanner and daemon' if kind == 'scanner' else 'updater')
+            + ' to use changes; services were not restarted.', 'backup': str(backup)}
+
+
+def service(kind, action):
+    if kind not in ('scanner', 'daemon', 'updater') or action not in ('start', 'stop', 'enable', 'disable'):
+        raise ValueError('Service action not allowed')
+    if kind == 'daemon':
+        units = [UNITS['socket'], UNITS['daemon']]
+        if action in ('stop', 'disable'):
+            units = [UNITS['scanner']] + units
+    elif kind == 'scanner' and action in ('start', 'enable'):
+        units = [UNITS['socket'], UNITS['daemon'], UNITS['scanner']]
+    else:
+        units = [UNITS[kind]]
+    checked(['/usr/bin/systemctl', action] + units)
+    return {'message': 'Completed ' + action + '. Refreshing actual state; runtime and boot settings are separate.'}
+
+
+def status():
+    result = {'sampledAt': int(time.time()), 'services': {}, 'configs': {}, 'errors': []}
+    for key, unit in UNITS.items():
+        try:
+            raw = checked(['/usr/bin/systemctl', 'show', unit, '--property=LoadState,ActiveState,UnitFileState,ExecStart'])
+            fields = dict(line.split('=', 1) for line in raw.splitlines() if '=' in line)
+            known = fields.get('LoadState') == 'loaded'
+            result['services'][key] = {'active': fields.get('ActiveState') if known else 'unknown',
+                'boot': fields.get('UnitFileState') if known else 'unknown',
+                'policy': fields.get('ExecStart', '')[:4096] if key == 'scanner' else ''}
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            result['services'][key] = {'active': 'unknown', 'boot': 'unknown', 'policy': ''}
+            result['errors'].append(str(error))
+    for kind, filename in FILES.items():
+        try:
+            text, _ = read_config(CONFIG / filename)
+            parsed = directives(text)
+            if kind == 'scanner':
+                values = {'include': parsed.get('OnAccessIncludePath', []),
+                          'exclude': parsed.get('OnAccessExcludePath', []),
+                          'maxSize': parsed.get('OnAccessMaxFileSize', ['5M'])[-1]}
+            else:
+                values = {'checks': parsed.get('Checks', ['12'])[-1]}
+            result['configs'][kind] = {'revision': revision(text), 'values': values}
+        except (OSError, ValueError) as error:
+            result['errors'].append(filename + ': ' + str(error))
+    return result
+
+
+@contextlib.contextmanager
+def lock():
+    fd = os.open('/run/omarchy-clamav-control.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+            raise ValueError('Unsafe control lock')
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+    finally:
+        os.close(fd)
+
+
+def main(args):
+    if args == ['status']:
+        return status()
+    if os.geteuid() != 0:
+        raise ValueError('Changes require administrator authentication')
+    with lock():
+        if len(args) == 3 and args[0] == 'service':
+            return service(args[1], args[2])
+        if len(args) == 4 and args[0] == 'apply' and args[1] in FILES:
+            if len(args[3]) > 131072:
+                raise ValueError('Request too large')
+            data = json.loads(args[3])
+            if not isinstance(data, dict):
+                raise ValueError('Expected a JSON object')
+            return apply_config(args[1], data, args[2])
+    raise ValueError('Action not allowed')
+
+
+if __name__ == '__main__':
+    try:
+        print(json.dumps(main(sys.argv[1:])))
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        print(str(error), file=sys.stderr)
+        sys.exit(1)

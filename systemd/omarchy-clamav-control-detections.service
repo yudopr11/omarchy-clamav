@@ -1,0 +1,13 @@
+[Unit]
+Description=Timestamp ClamAV on-access detections for ClamAV Control
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.config/omarchy/plugins/io.github.yudopr11.omarchy-clamav-control/bin/watch-detections.sh
+Restart=on-failure
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=default.target
