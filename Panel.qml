@@ -295,7 +295,7 @@ Panel {
             implicitHeight: cardBody.implicitHeight + Style.space(24)
             Rectangle {
               anchors.fill: parent
-              radius: Style.space(10)
+              radius: 0
               color: Util.alpha(root.foreground, 0.035)
               border.color: Util.alpha(root.foreground, 0.12)
             }
@@ -319,7 +319,7 @@ Panel {
             width: Math.min(implicitWidth, parent.width)
             implicitWidth: pillText.implicitWidth + Style.space(20)
             implicitHeight: pillText.implicitHeight + Style.space(8)
-            radius: height / 2
+            radius: 0
             color: Util.alpha(failed ? Color.urgent : root.foreground, active ? 0.12 : 0.06)
             border.color: Util.alpha(failed ? Color.urgent : root.foreground, 0.2)
             Text {
@@ -405,7 +405,7 @@ Panel {
                   anchors.margins: Style.spacing.md
                   anchors.bottomMargin: 0
                   height: Style.space(2)
-                  radius: height / 2
+                  radius: 0
                   color: Color.accent
                   opacity: tabItem.current ? 1 : 0
                 }
