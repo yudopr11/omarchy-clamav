@@ -11,7 +11,7 @@ class PanelTabsTests(unittest.TestCase):
         source = PANEL.read_text()
         for page, controls in {
             "overview": ["refreshButton", "installButton", "helperInstallButton", "logButton"],
-            "services": ["daemonStart", "daemonStop", "daemonBoot", "daemonDisableBoot", "scannerStart", "scannerStop", "scannerBoot", "updaterStart", "updaterStop", "updaterBoot"],
+            "services": ["policyDetailsButton", "prepareQuarantine", "daemonStart", "daemonStop", "daemonBoot", "daemonDisableBoot", "scannerStart", "scannerStop", "scannerBoot", "updaterStart", "updaterStop", "updaterBoot"],
             "settings": ["reloadButton", "includeField", "excludeField", "sizeField", "saveScanner", "checksField", "saveUpdater"],
         }.items():
             start = source.index('id: ' + page + 'Page')
@@ -22,6 +22,23 @@ class PanelTabsTests(unittest.TestCase):
                 self.assertIn('id: ' + control + ';', body)
             self.assertIn('"' + page + '": [' + ', '.join(controls) + ']', source)
         self.assertIn('pageItems[tab].filter(function(item) { return item.visible && item.enabled })', source)
+
+    def test_policy_details_are_optional_and_neutral(self):
+        source = PANEL.read_text()
+        self.assertIn('property bool policyDetailsVisible: false', source)
+        services = source[source.index('id: servicesPage'):source.index('// End services')]
+        self.assertNotIn('Local exploration', services)
+        button = next(line for line in services.splitlines() if 'id: policyDetailsButton;' in line)
+        self.assertIn('root.policyDetailsVisible ? "Hide policy details" : "Show policy details"', button)
+        self.assertIn('onClicked: root.policyDetailsVisible = !root.policyDetailsVisible', button)
+        self.assertIn('hasCursor: root.cursorItems[root.cursor] === policyDetailsButton', button)
+        details = next(line for line in services.splitlines() if 'root.serviceState("scanner").policy' in line)
+        self.assertIn('visible: root.policyDetailsVisible', details)
+        self.assertIn('root.stale ?', details)
+        self.assertIn('color: root.foreground', details)
+        summary = next(line for line in services.splitlines() if 'Existing service policy may move or remove detected files.' in line)
+        self.assertIn('color: root.foreground', summary)
+        self.assertIn('unknown', summary.lower())
 
     def test_setup_guidance_and_failure_diagnostics(self):
         source = PANEL.read_text()
@@ -34,6 +51,14 @@ class PanelTabsTests(unittest.TestCase):
         self.assertIn('daemon exclusion only when absent', source)
         self.assertIn('root.state.configs.updater.setup', source)
 
+    def test_quarantine_explicit_authenticated_wiring(self):
+        source = PANEL.read_text()
+        self.assertIn('root.request(["prepare-quarantine"])', source)
+        self.assertIn('root.state.quarantine.message', source)
+        self.assertIn('id: prepareQuarantine;', source)
+        self.assertIn('Does not start services', source)
+        self.assertIn('Readiness may be unavailable without authentication', source)
+
     def test_navigation_and_confirmation(self):
         source = PANEL.read_text()
         start = source.index('function setTab(')
@@ -44,7 +69,7 @@ class PanelTabsTests(unittest.TestCase):
         self.assertIn('root.switchPanel(direction)', source)
         self.assertIn('scroll.contentY = servicesPage.y', source)
         services = source[source.index('id: servicesPage'):source.index('// End services')]
-        self.assertIn('Existing on-access command/policy', services)
+        self.assertIn('Existing service policy may move or remove detected files.', services)
         self.assertIn('Confirm existing policy', services)
         self.assertIn('CursorSurface {', source)
         self.assertIn('color: Color.accent', source)

@@ -200,8 +200,43 @@ def service(kind, action):
                         if action == 'start' else 'Completed ' + action + '. Refreshing actual state; runtime and boot settings are separate.')}
 
 
+def quarantine(prepare=False):
+    raw = checked(['/usr/bin/systemctl', 'show', UNITS['scanner'],
+                   '--property=LoadState,ExecStart,User,Group,DynamicUser,RootDirectory,RootImage'])
+    fields = dict(line.split('=', 1) for line in raw.splitlines() if '=' in line)
+    # Only this fixed policy is supported; never turn service text into a filesystem path.
+    command = re.fullmatch(r'\{ path=(/usr/(?:sbin|bin)/clamonacc) ; argv\[\]=\1 (?:-F |--foreground )?(?:--log=/var/log/clamav/clamonacc.log )?--move=/root/quarantine ; ignore_errors=[^{}]* \}', fields.get('ExecStart', ''))
+    if (not command or fields.get('LoadState') != 'loaded'
+            or fields.get('User') not in ('', 'root') or fields.get('Group') not in ('', 'root')
+            or fields.get('DynamicUser') != 'no' or fields.get('RootDirectory') != ''
+            or fields.get('RootImage') != ''):
+        raise ValueError('Unsupported scanner policy: setup only supports root clamonacc with --move=/root/quarantine; inspect the unit manually')
+    parent = os.open('/root', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(parent)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+            raise ValueError('Unsafe parent /root')
+        try:
+            info = os.stat('quarantine', dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            if not prepare:
+                return {'state': 'missing', 'message': '/root/quarantine is missing; explicit authenticated preparation required.'}
+            os.mkdir('quarantine', mode=0o700, dir_fd=parent)
+            info = os.stat('quarantine', dir_fd=parent, follow_symlinks=False)
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_gid != 0
+                or stat.S_IMODE(info.st_mode) != 0o700):
+            raise ValueError('Unsafe quarantine: require an existing root:root 0700 directory, not a symlink; no permissions changed')
+    finally:
+        os.close(parent)
+    return {'state': 'ready', 'message': '/root/quarantine prepared; services not started. Existing --move policy can move detected files; this is not a protection verdict.'}
+
+
 def status():
     result = {'sampledAt': int(time.time()), 'services': {}, 'configs': {}, 'errors': []}
+    try:
+        result['quarantine'] = quarantine()
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        result['quarantine'] = {'state': 'unavailable', 'message': str(error)}
     for key, unit in UNITS.items():
         try:
             raw = checked(['/usr/bin/systemctl', 'show', unit, '--property=LoadState,ActiveState,UnitFileState,ExecStart,Result,ExecMainStatus'])
@@ -269,6 +304,8 @@ def main(args):
     if os.geteuid() != 0:
         raise ValueError('Changes require administrator authentication')
     with lock():
+        if args == ['prepare-quarantine']:
+            return quarantine(True)
         if len(args) == 3 and args[0] == 'service':
             return service(args[1], args[2])
         if len(args) == 4 and args[0] == 'apply' and args[1] in FILES:

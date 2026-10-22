@@ -33,6 +33,7 @@ Panel {
   property string statusError: ""
   property string confirmation: ""
   property bool confirmationCancel: true
+  property bool policyDetailsVisible: false
   property var pendingAction: []
   readonly property bool stale: statusFailed || now - lastGood > staleAfter
   readonly property bool historyStale: monitorFailed || now - lastMonitor > staleAfter
@@ -44,7 +45,7 @@ Panel {
   readonly property var tabs: ["overview", "services", "settings"]
   readonly property var pageItems: ({
     "overview": [refreshButton, installButton, helperInstallButton, logButton],
-    "services": [daemonStart, daemonStop, daemonBoot, daemonDisableBoot, scannerStart, scannerStop, scannerBoot, updaterStart, updaterStop, updaterBoot],
+    "services": [policyDetailsButton, prepareQuarantine, daemonStart, daemonStop, daemonBoot, daemonDisableBoot, scannerStart, scannerStop, scannerBoot, updaterStart, updaterStop, updaterBoot],
     "settings": [reloadButton, includeField, excludeField, sizeField, saveScanner, checksField, saveUpdater]
   })
   readonly property var cursorItems: pageItems[tab].filter(function(item) { return item.visible && item.enabled })
@@ -115,7 +116,7 @@ Panel {
     if ((kind === "scanner" || kind === "daemon") && (action === "start" || action === "enable")) {
       pendingAction = args
       confirmationCancel = true
-      confirmation = "Starting/enabling protection uses the existing system policy below. It can move or remove files. This plugin does not change that policy. Continue?"
+      confirmation = "Starting/enabling protection uses the existing system policy. It can move or remove files. This plugin does not change that policy. Continue?"
       Qt.callLater(function() { scroll.contentY = servicesPage.y; keys.forceActiveFocus() })
     } else request(args)
   }
@@ -379,7 +380,12 @@ Panel {
             width: parent.width
             spacing: Style.space(8)
             visible: root.tab === "services"
-            Label { text: "Existing on-access command/policy (read before enabling):\n" + (root.stale ? "Unknown — do not assume protection is enabled." : (root.serviceState("scanner").policy || "Unknown; inspect systemctl cat clamav-clamonacc.service before starting.")) + "\nLocal exploration found --move=/root/quarantine. Starting protection can move detected files. No quarantine/delete/restore actions are provided."; color: Color.urgent }
+            Label { text: "Existing service policy may move or remove detected files. This plugin preserves that policy; if details are unknown, inspect the service before starting."; color: root.foreground }
+            Button { id: policyDetailsButton; width: parent.width; text: root.policyDetailsVisible ? "Hide policy details" : "Show policy details"; focusable: true; hasCursor: root.cursorItems[root.cursor] === policyDetailsButton; onClicked: root.policyDetailsVisible = !root.policyDetailsVisible }
+            Label { visible: root.policyDetailsVisible; text: "ExecStart: " + (root.stale ? "Unknown/stale; inspect systemctl cat clamav-clamonacc.service before starting." : (root.serviceState("scanner").policy || "Unknown; inspect systemctl cat clamav-clamonacc.service before starting.")); color: root.foreground }
+            Label { text: root.stale ? "Quarantine readiness unknown/stale" : (root.state.quarantine ? root.state.quarantine.message : "Update helper for quarantine preparation status.") }
+            Label { text: "Readiness may be unavailable without authentication because /root is private. Prepare checks the current policy again and only creates root:root 0700 /root/quarantine if missing. It never changes existing permissions or policy. Does not start services; later starting the existing --move policy can move detected files." }
+            Action { id: prepareQuarantine; text: "Prepare /root/quarantine (authenticate)"; visible: !root.state.quarantine || root.state.quarantine.state !== "ready"; onClicked: root.request(["prepare-quarantine"]) }
             Label { visible: !!root.confirmation; text: root.confirmation; color: Color.urgent }
             Button { visible: !!root.confirmation; width: parent.width; text: "Confirm existing policy"; focusable: true; hasCursor: !root.confirmationCancel; onClicked: { root.confirmation = ""; root.request(root.pendingAction) } }
             Button { id: cancelButton; visible: !!root.confirmation; width: parent.width; text: "Cancel"; focusable: true; hasCursor: root.confirmationCancel; onClicked: root.confirmation = "" }
