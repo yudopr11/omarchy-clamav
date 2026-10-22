@@ -4,6 +4,8 @@ Native Omarchy bar panel: monitor recent detections and database age, control Cl
 
 Repository: https://github.com/yudopr11/omarchy-clamav
 
+![ClamAV Control panel in Omarchy](docs/ui.png)
+
 ## Requirements
 
 Omarchy with third-party QML plugins, its existing `qs.Commons`/`qs.Ui` components and terminal launcher; Bash, coreutils, jq, Python 3, systemd and polkit with a working authentication agent. ClamAV supplies `clamconf`. No new third-party libraries are required. The expected system units are `clamav-daemon.service`, `clamav-daemon.socket`, `clamav-clamonacc.service` and `clamav-freshclam.service`.
