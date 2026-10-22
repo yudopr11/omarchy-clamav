@@ -40,7 +40,26 @@ Panel {
   readonly property bool protectionActive: protectionKnown && serviceState("scanner").active === "active" && serviceState("daemon").active === "active"
   readonly property bool busy: actionProc.running
   property int cursor: 0
-  readonly property var cursorItems: [refreshButton, installButton, reloadButton, daemonStart, daemonStop, daemonBoot, daemonDisableBoot, scannerStart, scannerStop, scannerBoot, updaterStart, updaterStop, updaterBoot, includeField, excludeField, sizeField, saveScanner, checksField, saveUpdater, logButton]
+  property string tab: "overview"
+  readonly property var tabs: ["overview", "services", "settings"]
+  readonly property var pageItems: ({
+    "overview": [refreshButton, installButton, helperInstallButton, logButton],
+    "services": [daemonStart, daemonStop, daemonBoot, daemonDisableBoot, scannerStart, scannerStop, scannerBoot, updaterStart, updaterStop, updaterBoot],
+    "settings": [reloadButton, includeField, excludeField, sizeField, saveScanner, checksField, saveUpdater]
+  })
+  readonly property var cursorItems: pageItems[tab].filter(function(item) { return item.visible && item.enabled })
+  onCursorItemsChanged: cursor = Math.min(cursor, Math.max(0, cursorItems.length - 1))
+
+  function setTab(page) {
+    if (tabs.indexOf(page) < 0) return
+    confirmation = ""
+    pendingAction = []
+    tab = page
+    cursor = 0
+    scroll.contentY = 0
+    Qt.callLater(function() { keys.forceActiveFocus() })
+  }
+
 
   function serviceState(kind) {
     return state.services[kind] || { active: "unknown", boot: "unknown", policy: "" }
@@ -97,7 +116,7 @@ Panel {
       pendingAction = args
       confirmationCancel = true
       confirmation = "Starting/enabling protection uses the existing system policy below. It can move or remove files. This plugin does not change that policy. Continue?"
-      Qt.callLater(function() { keys.forceActiveFocus() })
+      Qt.callLater(function() { scroll.contentY = servicesPage.y; keys.forceActiveFocus() })
     } else request(args)
   }
   function save(kind) {
@@ -107,6 +126,7 @@ Panel {
     } catch (e) { message = "Include/exclude fields must be JSON arrays of absolute directory paths." }
   }
   function moveCursor(delta) {
+    if (!cursorItems.length) return
     for (var i = 0; i < cursorItems.length; i++) {
       cursor = (cursor + delta + cursorItems.length) % cursorItems.length
       if (cursorItems[cursor].enabled && cursorItems[cursor].visible) break
@@ -134,6 +154,15 @@ Panel {
     stderr: StdioCollector { id: packageInstallError; waitForEnd: true }
     onExited: function(code) {
       if (code !== 0) root.message = packageInstallError.text.trim() || "Could not launch the installer terminal."
+      root.refresh()
+    }
+  }
+  Process {
+    id: helperInstallProc
+    command: ["omarchy-launch-terminal", "bash", root.directory + "/bin/install-helper.sh"]
+    stderr: StdioCollector { id: helperInstallError; waitForEnd: true }
+    onExited: function(code) {
+      if (code !== 0) root.message = helperInstallError.text.trim() || "Could not launch or complete the helper installer terminal."
       root.refresh()
     }
   }
@@ -235,10 +264,10 @@ Panel {
       blocked: includeField.activeFocus || excludeField.activeFocus || sizeField.activeFocus || checksField.activeFocus
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
-      onMoveRequested: function(dx, dy) { if (root.confirmation) root.confirmationCancel = !root.confirmationCancel; else root.moveCursor(dx || dy) }
+      onMoveRequested: function(dx, dy) { if (root.confirmation) root.confirmationCancel = !root.confirmationCancel; else if (dx) root.setTab(root.tabs[(root.tabs.indexOf(root.tab) + dx + root.tabs.length) % root.tabs.length]); else root.moveCursor(dy) }
       onActivateRequested: {
         if (root.confirmation) { root.confirmation = ""; if (!root.confirmationCancel) root.request(root.pendingAction) }
-        else if (root.cursorItems[root.cursor].visible && root.cursorItems[root.cursor].enabled && root.cursorItems[root.cursor].clicked) root.cursorItems[root.cursor].clicked()
+        else if (root.cursorItems.length && root.cursorItems[root.cursor].visible && root.cursorItems[root.cursor].enabled && root.cursorItems[root.cursor].clicked) root.cursorItems[root.cursor].clicked()
       }
       Flickable {
         id: scroll
@@ -273,53 +302,120 @@ Panel {
           Label { visible: !!root.statusError; text: root.statusError; color: Color.urgent }
           Label { visible: root.state.errors.length > 0; text: root.state.errors.join("\n"); color: Color.urgent }
           Label { visible: !!root.message; text: root.message }
-          Button { id: refreshButton; hasCursor: root.cursorItems[root.cursor] === refreshButton; width: parent.width; text: "Refresh status"; focusable: true; onClicked: root.refresh() }
-          Label { text: "ClamAV package: " + root.packageState }
-          Button { id: installButton; visible: root.packageState === "absent"; width: parent.width; text: "Install ClamAV (Omarchy installer)"; focusable: true; hasCursor: root.cursorItems[root.cursor] === installButton; enabled: !packageInstallProc.running; onClicked: packageInstallProc.running = true }
-          Button { id: reloadButton; hasCursor: root.cursorItems[root.cursor] === reloadButton; width: parent.width; text: "Reload fields (discard unsaved edits)"; focusable: true; enabled: !root.busy; onClicked: { root.scannerDirty = false; root.updaterDirty = false; root.loadFields() } }
-          Label { text: "Existing on-access command/policy (read before enabling):\n" + (root.stale ? "Unknown — do not assume protection is enabled." : (root.serviceState("scanner").policy || "Unknown; inspect systemctl cat clamav-clamonacc.service before starting.")) + "\nLocal exploration found --move=/root/quarantine. Starting protection can move detected files. No quarantine/delete/restore actions are provided."; color: Color.urgent }
-          Label { visible: !!root.confirmation; text: root.confirmation; color: Color.urgent }
-          Button { visible: !!root.confirmation; width: parent.width; text: "Confirm existing policy"; focusable: true; hasCursor: !root.confirmationCancel; onClicked: { root.confirmation = ""; root.request(root.pendingAction) } }
-          Button { id: cancelButton; visible: !!root.confirmation; width: parent.width; text: "Cancel"; focusable: true; hasCursor: root.confirmationCancel; onClicked: root.confirmation = "" }
-          PanelSectionHeader { text: "SERVICES — RUNNING AND BOOT ARE SEPARATE"; foreground: root.foreground; fontFamily: root.fontFamily }
-          Label { text: "Daemon: " + (root.stale ? "unknown" : root.serviceState("daemon").active + " / " + root.serviceState("daemon").boot) + "\nSocket: " + (root.stale ? "unknown" : root.serviceState("socket").active + " / " + root.serviceState("socket").boot) }
-          Action { id: daemonStart; serviceKind: "daemon"; operation: "start"; text: "Start daemon + socket"; onClicked: root.serviceAction("daemon", "start") }
-          Action { id: daemonStop; serviceKind: "daemon"; operation: "stop"; text: "Stop scanner + socket + daemon"; onClicked: root.serviceAction("daemon", "stop") }
-          Action { id: daemonBoot; serviceKind: "daemon"; operation: "enable"; text: "Enable daemon + socket at boot"; onClicked: root.serviceAction("daemon", "enable") }
-          Action { id: daemonDisableBoot; serviceKind: "daemon"; operation: "disable"; text: "Disable scanner + daemon + socket at boot"; onClicked: root.serviceAction("daemon", "disable") }
-          Label { text: "Scanner: " + (root.stale ? "unknown" : root.serviceState("scanner").active + " / " + root.serviceState("scanner").boot) }
-          Action { id: scannerStart; serviceKind: "scanner"; operation: "start"; text: "Start on-access scanner + dependencies"; onClicked: root.serviceAction("scanner", "start") }
-          Action { id: scannerStop; serviceKind: "scanner"; operation: "stop"; text: "Stop on-access scanner (daemon/socket remain)"; onClicked: root.serviceAction("scanner", "stop") }
-          Action { id: scannerBoot; serviceKind: "scanner"; operation: root.bootAction("scanner"); text: root.bootAction("scanner") + " scanner at boot"; enabled: !root.stale && !root.busy && !root.confirmation && root.bootKnown("scanner"); onClicked: root.serviceAction("scanner", root.bootAction("scanner")) }
-          Label { text: "Updater: " + (root.stale ? "unknown" : root.serviceState("updater").active + " / " + root.serviceState("updater").boot) }
-          Action { id: updaterStart; serviceKind: "updater"; operation: "start"; text: "Start updater"; onClicked: root.serviceAction("updater", "start") }
-          Action { id: updaterStop; serviceKind: "updater"; operation: "stop"; text: "Stop updater"; onClicked: root.serviceAction("updater", "stop") }
-          Action { id: updaterBoot; serviceKind: "updater"; operation: root.bootAction("updater"); text: root.bootAction("updater") + " updater at boot"; enabled: !root.stale && !root.busy && !root.confirmation && root.bootKnown("updater"); onClicked: root.serviceAction("updater", root.bootAction("updater")) }
-          PanelSectionHeader { text: "ON-ACCESS CONFIGURATION"; foreground: root.foreground; fontFamily: root.fontFamily }
-          Label { text: "Include/exclude: JSON arrays of existing absolute directories, e.g. [\"/home\"]. Apply saves only; stop scanner+daemon, then start daemon and scanner to use new settings. Backups remain next to the config." }
-          Label { text: "Include paths" }
-          TextField { id: includeField; property string revision: ""; width: parent.width; enabled: !!root.state.configs.scanner && !root.busy; onTextEdited: root.scannerDirty = true; Keys.onEscapePressed: keys.forceActiveFocus() }
-          Label { text: "Exclude paths" }
-          TextField { id: excludeField; width: parent.width; enabled: includeField.enabled; onTextEdited: root.scannerDirty = true; Keys.onEscapePressed: keys.forceActiveFocus() }
-          Label { text: "Maximum on-access size (bytes or K/M/G; 1 byte–4G)" }
-          TextField { id: sizeField; width: parent.width; enabled: includeField.enabled; onTextEdited: root.scannerDirty = true; Keys.onEscapePressed: keys.forceActiveFocus() }
-          Action { id: saveScanner; text: "Apply scanner settings (authenticate)"; enabled: includeField.enabled && !root.stale && !root.confirmation; onClicked: root.save("scanner") }
-          Label { text: "freshclam checks per day (1–50). Restart updater after applying." }
-          TextField { id: checksField; property string revision: ""; width: parent.width; enabled: !!root.state.configs.updater && !root.busy; onTextEdited: root.updaterDirty = true; Keys.onEscapePressed: keys.forceActiveFocus() }
-          Action { id: saveUpdater; text: "Apply update frequency (authenticate)"; enabled: checksField.enabled && !root.stale && !root.confirmation; onClicked: root.save("updater") }
-          PanelSectionHeader { text: "MONITOR / RECENT HISTORY"; foreground: root.foreground; fontFamily: root.fontFamily }
-          Label { text: root.historyStale ? "History unknown/stale; showing last available records." : (root.monitor.logReadable ? "Last ten logged detections, not a full-system scan. File presence is not a quarantine verdict." : "Detection log unreadable or absent; see README for optional collector setup.") }
-          Label { text: "Daily database file modified: " + (root.monitor.lastUpdateEpoch ? new Date(root.monitor.lastUpdateEpoch * 1000).toLocaleString(Qt.locale(), Locale.ShortFormat) : "unknown") + " (not proof of a successful update)" }
-          Label { text: root.monitor.total + " logged detections; " + root.monitor.activeCount + " of the last ten paths currently visible to this user. Missing paths may be inaccessible, moved or removed." }
-          Repeater {
-            model: root.monitor.recent
-            Label {
-              required property var modelData
-              text: modelData.signature + "\n" + new Date(modelData.whenEpoch * 1000).toLocaleString(Qt.locale(), Locale.ShortFormat) + "\n" + modelData.path + "\n" + (modelData.present ? "Path still present" : "Path absent or inaccessible")
-              color: modelData.present ? Color.urgent : root.foreground
+          Row {
+            width: parent.width
+            height: Style.space(32)
+            Repeater {
+              model: ["Overview", "Services", "Settings"]
+              delegate: Item {
+                id: tabItem
+                required property string modelData
+                required property int index
+                readonly property bool current: root.tab === root.tabs[index]
+                width: parent.width / 3
+                height: parent.height
+                CursorSurface {
+                  anchors.fill: parent
+                  anchors.bottomMargin: Style.space(2)
+                  hasCursor: tabMouse.containsMouse
+                  current: tabItem.current
+                  foreground: root.foreground
+                }
+                Text {
+                  anchors.centerIn: parent
+                  text: tabItem.modelData
+                  color: tabItem.current ? root.foreground : Qt.darker(root.foreground, 1.5)
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  font.bold: tabItem.current
+                }
+                Rectangle {
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.bottom: parent.bottom
+                  anchors.margins: Style.spacing.md
+                  anchors.bottomMargin: 0
+                  height: Style.space(2)
+                  radius: height / 2
+                  color: Color.accent
+                  opacity: tabItem.current ? 1 : 0
+                }
+                MouseArea {
+                  id: tabMouse
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.setTab(root.tabs[tabItem.index])
+                }
+              }
             }
           }
-          Button { id: logButton; hasCursor: root.cursorItems[root.cursor] === logButton; width: parent.width; text: "Open detection log"; focusable: true; onClicked: { if (root.bar) root.bar.run("omarchy-launch-editor " + Util.shellQuote(Quickshell.env("HOME") + "/.local/state/omarchy/clamav-detections.log")) } }
+          Column {
+            id: overviewPage
+            width: parent.width
+            spacing: Style.space(8)
+            visible: root.tab === "overview"
+            Button { id: refreshButton; hasCursor: root.cursorItems[root.cursor] === refreshButton; width: parent.width; text: "Refresh status"; focusable: true; onClicked: root.refresh() }
+            Label { text: "ClamAV package: " + root.packageState }
+            Button { id: installButton; visible: root.packageState === "absent"; width: parent.width; text: "Install ClamAV (Omarchy installer)"; focusable: true; hasCursor: root.cursorItems[root.cursor] === installButton; enabled: !packageInstallProc.running; onClicked: packageInstallProc.running = true }
+            Button { id: helperInstallButton; width: parent.width; text: "Install / update control helper"; focusable: true; hasCursor: root.cursorItems[root.cursor] === helperInstallButton; enabled: !helperInstallProc.running; onClicked: helperInstallProc.running = true }
+            PanelSectionHeader { text: "MONITOR / RECENT HISTORY"; foreground: root.foreground; fontFamily: root.fontFamily }
+            Label { text: root.historyStale ? "History unknown/stale; showing last available records." : (root.monitor.logReadable ? "Last ten logged detections, not a full-system scan. File presence is not a quarantine verdict." : "Detection log unreadable or absent; see README for optional collector setup.") }
+            Label { text: "Daily database file modified: " + (root.monitor.lastUpdateEpoch ? new Date(root.monitor.lastUpdateEpoch * 1000).toLocaleString(Qt.locale(), Locale.ShortFormat) : "unknown") + " (not proof of a successful update)" }
+            Label { text: root.monitor.total + " logged detections; " + root.monitor.activeCount + " of the last ten paths currently visible to this user. Missing paths may be inaccessible, moved or removed." }
+            Repeater {
+              model: root.monitor.recent
+              Label {
+                required property var modelData
+                text: modelData.signature + "\n" + new Date(modelData.whenEpoch * 1000).toLocaleString(Qt.locale(), Locale.ShortFormat) + "\n" + modelData.path + "\n" + (modelData.present ? "Path still present" : "Path absent or inaccessible")
+                color: modelData.present ? Color.urgent : root.foreground
+              }
+            }
+            Button { id: logButton; hasCursor: root.cursorItems[root.cursor] === logButton; width: parent.width; text: "Open detection log"; focusable: true; onClicked: { if (root.bar) root.bar.run("omarchy-launch-editor " + Util.shellQuote(Quickshell.env("HOME") + "/.local/state/omarchy/clamav-detections.log")) } }
+          } // End overview
+          Column {
+            id: servicesPage
+            width: parent.width
+            spacing: Style.space(8)
+            visible: root.tab === "services"
+            Label { text: "Existing on-access command/policy (read before enabling):\n" + (root.stale ? "Unknown — do not assume protection is enabled." : (root.serviceState("scanner").policy || "Unknown; inspect systemctl cat clamav-clamonacc.service before starting.")) + "\nLocal exploration found --move=/root/quarantine. Starting protection can move detected files. No quarantine/delete/restore actions are provided."; color: Color.urgent }
+            Label { visible: !!root.confirmation; text: root.confirmation; color: Color.urgent }
+            Button { visible: !!root.confirmation; width: parent.width; text: "Confirm existing policy"; focusable: true; hasCursor: !root.confirmationCancel; onClicked: { root.confirmation = ""; root.request(root.pendingAction) } }
+            Button { id: cancelButton; visible: !!root.confirmation; width: parent.width; text: "Cancel"; focusable: true; hasCursor: root.confirmationCancel; onClicked: root.confirmation = "" }
+            PanelSectionHeader { text: "SERVICES — RUNNING AND BOOT ARE SEPARATE"; foreground: root.foreground; fontFamily: root.fontFamily }
+            Label { text: "Daemon: " + (root.stale ? "unknown" : root.serviceState("daemon").active + " / " + root.serviceState("daemon").boot) + "\nSocket: " + (root.stale ? "unknown" : root.serviceState("socket").active + " / " + root.serviceState("socket").boot) }
+            Action { id: daemonStart; serviceKind: "daemon"; operation: "start"; text: "Start daemon + socket"; onClicked: root.serviceAction("daemon", "start") }
+            Action { id: daemonStop; serviceKind: "daemon"; operation: "stop"; text: "Stop scanner + socket + daemon"; onClicked: root.serviceAction("daemon", "stop") }
+            Action { id: daemonBoot; serviceKind: "daemon"; operation: "enable"; text: "Enable daemon + socket at boot"; onClicked: root.serviceAction("daemon", "enable") }
+            Action { id: daemonDisableBoot; serviceKind: "daemon"; operation: "disable"; text: "Disable scanner + daemon + socket at boot"; onClicked: root.serviceAction("daemon", "disable") }
+            Label { text: "Scanner: " + (root.stale ? "unknown" : root.serviceState("scanner").active + " / " + root.serviceState("scanner").boot) }
+            Action { id: scannerStart; serviceKind: "scanner"; operation: "start"; text: "Start on-access scanner + dependencies"; onClicked: root.serviceAction("scanner", "start") }
+            Action { id: scannerStop; serviceKind: "scanner"; operation: "stop"; text: "Stop on-access scanner (daemon/socket remain)"; onClicked: root.serviceAction("scanner", "stop") }
+            Action { id: scannerBoot; serviceKind: "scanner"; operation: root.bootAction("scanner"); text: root.bootAction("scanner") + " scanner at boot"; enabled: !root.stale && !root.busy && !root.confirmation && root.bootKnown("scanner"); onClicked: root.serviceAction("scanner", root.bootAction("scanner")) }
+            Label { text: "Updater: " + (root.stale ? "unknown" : root.serviceState("updater").active + " / " + root.serviceState("updater").boot) }
+            Action { id: updaterStart; serviceKind: "updater"; operation: "start"; text: "Start updater"; onClicked: root.serviceAction("updater", "start") }
+            Action { id: updaterStop; serviceKind: "updater"; operation: "stop"; text: "Stop updater"; onClicked: root.serviceAction("updater", "stop") }
+            Action { id: updaterBoot; serviceKind: "updater"; operation: root.bootAction("updater"); text: root.bootAction("updater") + " updater at boot"; enabled: !root.stale && !root.busy && !root.confirmation && root.bootKnown("updater"); onClicked: root.serviceAction("updater", root.bootAction("updater")) }
+          } // End services
+          Column {
+            id: settingsPage
+            width: parent.width
+            spacing: Style.space(8)
+            visible: root.tab === "settings"
+            Button { id: reloadButton; hasCursor: root.cursorItems[root.cursor] === reloadButton; width: parent.width; text: "Reload fields (discard unsaved edits)"; focusable: true; enabled: !root.busy; onClicked: { root.scannerDirty = false; root.updaterDirty = false; root.loadFields() } }
+            PanelSectionHeader { text: "ON-ACCESS CONFIGURATION"; foreground: root.foreground; fontFamily: root.fontFamily }
+            Label { text: "Include/exclude: JSON arrays of existing absolute directories, e.g. [\"/home\"]. Apply saves only; stop scanner+daemon, then start daemon and scanner to use new settings. Backups remain next to the config." }
+            Label { text: "Include paths" }
+            TextField { id: includeField; property string revision: ""; width: parent.width; enabled: !!root.state.configs.scanner && !root.busy; onTextEdited: root.scannerDirty = true; Keys.onEscapePressed: keys.forceActiveFocus() }
+            Label { text: "Exclude paths" }
+            TextField { id: excludeField; width: parent.width; enabled: includeField.enabled; onTextEdited: root.scannerDirty = true; Keys.onEscapePressed: keys.forceActiveFocus() }
+            Label { text: "Maximum on-access size (bytes or K/M/G; 1 byte–4G)" }
+            TextField { id: sizeField; width: parent.width; enabled: includeField.enabled; onTextEdited: root.scannerDirty = true; Keys.onEscapePressed: keys.forceActiveFocus() }
+            Action { id: saveScanner; text: "Apply scanner settings (authenticate)"; enabled: includeField.enabled && !root.stale && !root.confirmation; onClicked: root.save("scanner") }
+            Label { text: "freshclam checks per day (1–50). Restart updater after applying." }
+            TextField { id: checksField; property string revision: ""; width: parent.width; enabled: !!root.state.configs.updater && !root.busy; onTextEdited: root.updaterDirty = true; Keys.onEscapePressed: keys.forceActiveFocus() }
+            Action { id: saveUpdater; text: "Apply update frequency (authenticate)"; enabled: checksField.enabled && !root.stale && !root.confirmation; onClicked: root.save("updater") }
+          } // End settings
         }
       }
     }

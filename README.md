@@ -16,15 +16,17 @@ omarchy plugin add https://github.com/yudopr11/omarchy-clamav.git --enable
 
 If ClamAV is missing, open the panel and press **Install ClamAV (Omarchy installer)**. This launches `omarchy-launch-terminal bash <plugin-directory>/bin/install-clamav.sh`, which runs `omarchy pkg add clamav` in a visible terminal and preserves its exit status. Package detection uses `omarchy-pkg-present clamav` independently of the control helper, so the button remains usable before helper installation. Detection refreshes every five seconds even if the launcher exits before its terminal. This plugin does not start or enable services as part of package installation; package-manager hooks remain the package's responsibility.
 
-Review and install the narrow system helper separately, after installing ClamAV:
+After installing ClamAV, review the bundled helper and installer, then press **Install / update control helper** in the panel. This explicitly launches `omarchy-launch-terminal bash <plugin-directory>/bin/install-helper.sh`; the wrapper resolves its plugin directory and runs `sudo bash <plugin-directory>/scripts/install-helper.sh` using an absolute script path. The visible terminal explains the safety scope, shows success/failure and the exit code, and waits for Enter. The button is available even when helper status is missing or stale and supports the panel's arrow-key/Enter navigation. Status refreshes when the terminal launcher exits and every five seconds while the panel is open (including launchers that return before the terminal closes).
+
+Alternatively, review and install manually from the plugin directory; this does not require a working helper:
 
 ```sh
 cd ~/.config/omarchy/plugins/io.github.yudopr11.omarchy-clamav-control
 less scripts/omarchy-clamav-control polkit/io.github.yudopr11.omarchy-clamav-control.policy scripts/install-helper.sh
-sudo ./scripts/install-helper.sh
+sudo bash scripts/install-helper.sh
 ```
 
-This installs only `/usr/local/bin/omarchy-clamav-control` (root-owned, 0755), its polkit action (0644), and `/usr/local/share/omarchy-clamav-control.sha256` (ownership/checksum ledger). It does not alter ClamAV configuration, services, quarantine or databases. Re-running the installer updates only unchanged managed artifacts; modified/unmanaged destinations are refused. Failed installs attempt to restore previous artifacts. Review and re-run it when updating the bundled helper.
+This installs only `/usr/local/bin/omarchy-clamav-control` (root-owned, 0755), its polkit action (0644), and `/usr/local/share/omarchy-clamav-control.sha256` (ownership/checksum ledger). It does not alter ClamAV configuration, services, quarantine or databases. Re-running the installer updates only unchanged managed artifacts; modified/unmanaged destinations are refused. Failed installs attempt to restore previous artifacts. Review and re-run it (or use the panel button) when updating the bundled helper.
 
 For a local checkout, copy only the plugin files, not `.git` or Python caches:
 
@@ -38,6 +40,8 @@ omarchy plugin enable io.github.yudopr11.omarchy-clamav-control right
 
 ## Controls and safety
 
+The panel has three pages: **Overview** for status, package/helper setup and recent history; **Services** for running/boot controls and the existing-policy warning; **Settings** for scanner/updater fields and reload. Click a tab or use Left/Right outside text editing to switch pages; switching cancels any pending policy confirmation, resets scrolling and returns keyboard focus to the panel. Unsaved field edits are retained across pages. Helper installation remains available on Overview even with missing/stale status.
+
 - Running and boot controls are separate: **enable** never implies `--now`. Starting the scanner includes daemon/socket dependencies. Stopping the daemon also stops the scanner and socket, preventing immediate socket reactivation. Disabling daemon boot also disables scanner/socket boot; disabling boot does not stop currently running processes.
 - Each service control depends on its relevant known unit states, not unrelated services. A failed multi-unit command may partially succeed: read the error and refreshed actual state.
 - **Existing policy is preserved.** Exploration of this machine found `--move=/root/quarantine` in the scanner's service command. The panel displays the current command and asks for confirmation before starting/enabling protection. Starting existing protection can move or remove files according to administrator policy. There are no quarantine, delete, restore or manual-scan actions.
@@ -47,7 +51,7 @@ omarchy plugin enable io.github.yudopr11.omarchy-clamav-control right
 - The installed helper accepts only fixed service actions and the two narrow configuration edits. Mutations require `pkexec` administrator authentication against the installed root-owned helper, never a writable checkout command or arbitrary shell. Read-only status is unprivileged: unreadable configuration is reported as unavailable, not read with hidden elevation. Unsafe owners, writable config directories/files, symlinks, special files and oversized configuration inputs are refused.
 - Unknown/failed/stale status is not displayed as healthy protection. The icon dims when on-access protection is inactive or unknown, and turns urgent for fresh detections whose paths are still visible. Updater health is shown separately; a running scanner does not prove complete scan coverage or a healthy database.
 
-The background-refresh preference is stored in Omarchy widget settings (10–600 seconds, default 60); the open panel refreshes every five seconds. Arrow keys skip disabled/hidden controls and scroll the cursor into view; Enter activates buttons/confirmation, Escape leaves text editing, and Tab follows the host's panel-switching convention. Mouse interaction is also supported.
+The background-refresh preference is stored in Omarchy widget settings (10–600 seconds, default 60); the open panel refreshes every five seconds. Up/Down skip disabled/hidden controls on the active page and scroll the cursor into view; Enter activates buttons/confirmation, Escape leaves text editing, and Tab follows the host's panel-switching convention. Mouse interaction is also supported.
 
 ## Monitor and optional history collector
 
@@ -107,7 +111,11 @@ python3 tests/check_coverage.py coverage.json
 
 The JSON gate requires actual line **and** branch coverage each strictly greater than 90%, for both the total and `scripts/omarchy-clamav-control`; missing helper/empty measurements fail. The combined report alone cannot enforce both thresholds. Coverage measures the extensionless Python helper, not Bash, QML or the embedded Python in `bin/status.sh`; this is not whole-plugin coverage.
 
-Tests use fixtures/mocks for parsing, restrictions, config preservation, backups, concurrent edits, write failures, missing units, timeouts and the package installer. If `clamconf` exists, an unprivileged fixture-parser integration check also runs. No live system changes are made by these checks. Live QML rendering, polkit dialogs, service changes, package installation and writes to `/etc/clamav` require manual verification on a disposable/test setup; they were not exercised during development. Standalone qmllint cannot fully resolve Omarchy's `qs` runtime imports.
+Tests use fixtures/mocks for parsing, restrictions, config preservation, backups, concurrent edits, write failures, missing units, timeouts and the package/helper terminal installers. If `clamconf` exists, an unprivileged fixture-parser integration check also runs. No live system changes are made by these checks. Live QML rendering, polkit dialogs, service changes, package installation and writes to `/etc/clamav` require manual verification on a disposable/test setup; they were not exercised during development. Standalone qmllint cannot fully resolve Omarchy's `qs` runtime imports.
+
+Manual tab verification (static wiring tests do not exercise QML): check mouse and Left/Right page changes, Up/Down/Enter on each page, empty/disabled control lists, text-field Escape and host Tab switching. Scroll each page, then change pages and confirm scroll/focus reset. Start a policy confirmation, switch pages by mouse and verify it is cancelled; return to Services and confirm a fresh prompt is required. Check stale status still blocks mutations and helper setup remains usable on Overview. These rendering/focus checks remain unperformed.
+
+Manual UI verification (not covered by Python tests): on an authorized disposable setup with a missing helper, open the panel, arrow to **Install / update control helper**, press Enter, and confirm the visible terminal explains the sudo installation. Check both authentication cancellation/failure and success, then press Enter to close. Verify errors remain visible in the terminal, the button remains usable with stale status, and successful setup recovers status within the open panel's polling interval without starting services or editing ClamAV configuration. Also check recovery if the terminal launcher returns before its window closes. This live rendering/authentication check remains unperformed; use a disposable setup before relying on the UI flow.
 
 ## Attribution
 

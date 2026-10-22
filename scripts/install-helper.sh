@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Explicit system installation only; never called by the panel.
+# Explicit system installation only; invoked manually or by the terminal installer.
 set -euo pipefail
 [[ $EUID == 0 ]] || { printf 'Review this script, then run sudo ./scripts/install-helper.sh\n' >&2; exit 1; }
 [[ $# == 0 ]] || exit 1
