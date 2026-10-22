@@ -7,6 +7,52 @@ PANEL = Path(__file__).resolve().parents[1] / "Panel.qml"
 
 
 class PanelTabsTests(unittest.TestCase):
+    def test_visual_groups_and_nested_navigation(self):
+        source = PANEL.read_text()
+        for card in ["setupCard", "historyCard", "daemonCard", "scannerCard",
+                     "updaterCard", "policyCard", "scannerSettingsCard", "updaterSettingsCard"]:
+            self.assertIn("id: " + card, source)
+        self.assertIn("component Card: Item", source)
+        self.assertIn("default property alias contents: cardBody.data", source)
+        self.assertIn("component StatusPill: Rectangle", source)
+        self.assertIn('root.stale ? "unknown" : root.serviceState(kind).active', source)
+        self.assertIn('text: "Runtime"', source)
+        self.assertIn('text: "At boot"', source)
+        self.assertIn("component Actions: Flow", source)
+        self.assertIn('Heading { text: "Checks per day (1–50)" }', source)
+        self.assertIn('id: historyRecord', source)
+        self.assertIn('text: historyRecord.modelData.path', source)
+        services = source[source.index("id: servicesPage"):source.index("// End services")]
+        self.assertLess(services.index("text: root.confirmation"), services.index("id: policyCard"))
+        self.assertIn("width: Math.min(implicitWidth, parent.width)", source)
+        self.assertIn("item.mapToItem(content, 0, 0).y", source)
+        self.assertIn("servicesPage.mapToItem(content, 0, 0).y", source)
+        self.assertNotIn('color: modelData.present ? Color.urgent', source)
+        self.assertNotIn('text: root.confirmation; color: Color.urgent', source)
+
+    def test_compact_button_labels_preserve_effect_guidance(self):
+        source = PANEL.read_text()
+        for control, label in {
+            "scannerStart": "Start scanner", "scannerStop": "Stop scanner",
+            "daemonStart": "Start daemon", "daemonStop": "Stop daemon",
+            "daemonBoot": "Enable at boot", "daemonDisableBoot": "Disable at boot",
+            "saveScanner": "Apply scanner settings", "saveUpdater": "Apply update frequency",
+            "prepareQuarantine": "Prepare quarantine",
+            "installButton": "Install ClamAV", "helperInstallButton": "Install / update helper",
+            "reloadButton": "Reload fields",
+        }.items():
+            line = next(line for line in source.splitlines() if 'id: ' + control + ';' in line)
+            self.assertIn('text: "' + label + '";', line)
+        for help_text in [
+            "Start includes socket; stop also stops scanner and socket.",
+            "Enable includes socket; disable also disables scanner and socket. Running services are unchanged.",
+            "Start includes daemon/socket dependencies; stop leaves daemon/socket running.",
+            "Apply requires authentication and saves configuration only.",
+            "Prepare /root/quarantine requires authentication.",
+            "Reload discards unsaved edits.",
+        ]:
+            self.assertIn('Label { text: "' + help_text, source)
+
     def test_pages_and_cursor_scope(self):
         source = PANEL.read_text()
         for page, controls in {
@@ -42,6 +88,8 @@ class PanelTabsTests(unittest.TestCase):
 
     def test_setup_guidance_and_failure_diagnostics(self):
         source = PANEL.read_text()
+        self.assertNotIn(r'\\n3. Settings', source)
+        self.assertNotIn(r'\\n4. Services', source)
         self.assertIn('1. Install ClamAV', source)
         self.assertIn('2. Install / update control helper', source)
         self.assertIn('3. Settings', source)
@@ -67,7 +115,7 @@ class PanelTabsTests(unittest.TestCase):
             self.assertIn(statement, body)
         self.assertIn('else if (dx) root.setTab', source)
         self.assertIn('root.switchPanel(direction)', source)
-        self.assertIn('scroll.contentY = servicesPage.y', source)
+        self.assertIn('scroll.contentY = servicesPage.mapToItem(content, 0, 0).y', source)
         services = source[source.index('id: servicesPage'):source.index('// End services')]
         self.assertIn('Existing service policy may move or remove detected files.', services)
         self.assertIn('Confirm existing policy', services)

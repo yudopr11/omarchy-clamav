@@ -117,7 +117,7 @@ Panel {
       pendingAction = args
       confirmationCancel = true
       confirmation = "Starting/enabling protection uses the existing system policy. It can move or remove files. This plugin does not change that policy. Continue?"
-      Qt.callLater(function() { scroll.contentY = servicesPage.y; keys.forceActiveFocus() })
+      Qt.callLater(function() { scroll.contentY = servicesPage.mapToItem(content, 0, 0).y; keys.forceActiveFocus() })
     } else request(args)
   }
   function save(kind) {
@@ -288,18 +288,86 @@ Panel {
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
           }
+          component Card: Item {
+            id: card
+            default property alias contents: cardBody.data
+            width: parent.width
+            implicitHeight: cardBody.implicitHeight + Style.space(24)
+            Rectangle {
+              anchors.fill: parent
+              radius: Style.space(10)
+              color: Util.alpha(root.foreground, 0.035)
+              border.color: Util.alpha(root.foreground, 0.12)
+            }
+            Column {
+              id: cardBody
+              x: Style.space(12)
+              y: Style.space(12)
+              width: card.width - Style.space(24)
+              spacing: Style.space(10)
+            }
+          }
+          component Heading: Label {
+            font.bold: true
+            font.pixelSize: Style.font.body
+          }
+          component StatusPill: Rectangle {
+            id: pill
+            property string text: ""
+            property bool failed: false
+            property bool active: false
+            width: Math.min(implicitWidth, parent.width)
+            implicitWidth: pillText.implicitWidth + Style.space(20)
+            implicitHeight: pillText.implicitHeight + Style.space(8)
+            radius: height / 2
+            color: Util.alpha(failed ? Color.urgent : root.foreground, active ? 0.12 : 0.06)
+            border.color: Util.alpha(failed ? Color.urgent : root.foreground, 0.2)
+            Text {
+              id: pillText
+              anchors.centerIn: parent
+              width: parent.width - Style.space(20)
+              text: pill.text
+              textFormat: Text.PlainText
+              elide: Text.ElideRight
+              color: pill.failed ? Color.urgent : root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              font.bold: pill.active
+            }
+          }
+          component ServiceStatus: Flow {
+            id: serviceStatus
+            required property string kind
+            readonly property string runtime: root.stale ? "unknown" : root.serviceState(kind).active
+            width: parent.width
+            spacing: Style.space(8)
+            StatusPill { text: "Runtime: " + serviceStatus.runtime; active: serviceStatus.runtime === "active"; failed: serviceStatus.runtime === "failed" }
+            StatusPill { text: "Boot: " + (root.stale ? "unknown" : root.serviceState(serviceStatus.kind).boot) }
+          }
+          component Actions: Flow {
+            width: parent.width
+            spacing: Style.space(6)
+          }
           component Action: Button {
             property string serviceKind: ""
             property string operation: ""
             hasCursor: root.cursorItems[root.cursor] === this
-            width: parent.width
+            width: Math.min(implicitWidth, parent.width)
             foreground: root.foreground
             fontFamily: root.fontFamily
             focusable: true
             enabled: !root.busy && !root.stale && (serviceKind === "" || root.canService(serviceKind, operation)) && !root.confirmation
           }
           Label { text: "ClamAV Control"; font.pixelSize: Style.font.title; font.bold: true }
-          Label { text: !root.protectionKnown ? "Protection status unknown/stale — only controls with known relevant state are available" : (root.protectionActive ? "On-access monitoring active" : "On-access monitoring inactive") }
+          Actions {
+            StatusPill {
+              text: !root.protectionKnown ? "Status unknown / stale" : (root.protectionActive ? "On-access active" : (root.serviceState("scanner").active === "failed" || root.serviceState("daemon").active === "failed" || root.serviceState("socket").active === "failed" ? "Protection failed" : "On-access inactive"))
+              active: root.protectionActive
+              failed: root.protectionKnown && (root.serviceState("scanner").active === "failed" || root.serviceState("daemon").active === "failed" || root.serviceState("socket").active === "failed")
+            }
+            StatusPill { text: "ClamAV · " + root.packageState }
+          }
+          Label { text: "Runtime and boot settings are independent. Monitoring is not a coverage verdict." }
           Label { visible: !!root.statusError; text: root.statusError; color: Color.urgent }
           Label { visible: root.state.errors.length > 0; text: root.state.errors.join("\n"); color: Color.urgent }
           Label { visible: !!root.message; text: root.message }
@@ -354,78 +422,142 @@ Panel {
           Column {
             id: overviewPage
             width: parent.width
-            spacing: Style.space(8)
+            spacing: Style.space(12)
             visible: root.tab === "overview"
             Button { id: refreshButton; hasCursor: root.cursorItems[root.cursor] === refreshButton; width: parent.width; text: "Refresh status"; focusable: true; onClicked: root.refresh() }
-            Label { text: "1. Install ClamAV below.\n2. Install / update control helper (required after plugin updates).\n3. Settings: choose watched directories, review exclusions, Apply scanner setup; Apply updater settings if using package examples.\n4. Services: start updater first and allow database download, then start daemon/scanner after reviewing existing policy. Boot enablement is optional and separate. Nothing starts automatically." }
-            Label { text: "ClamAV package: " + root.packageState }
-            Button { id: installButton; visible: root.packageState === "absent"; width: parent.width; text: "Install ClamAV (Omarchy installer)"; focusable: true; hasCursor: root.cursorItems[root.cursor] === installButton; enabled: !packageInstallProc.running; onClicked: packageInstallProc.running = true }
-            Button { id: helperInstallButton; width: parent.width; text: "Install / update control helper"; focusable: true; hasCursor: root.cursorItems[root.cursor] === helperInstallButton; enabled: !helperInstallProc.running; onClicked: helperInstallProc.running = true }
-            PanelSectionHeader { text: "MONITOR / RECENT HISTORY"; foreground: root.foreground; fontFamily: root.fontFamily }
-            Label { text: root.historyStale ? "History unknown/stale; showing last available records." : (root.monitor.logReadable ? "Last ten logged detections, not a full-system scan. File presence is not a quarantine verdict." : "Detection log unreadable or absent; see README for optional collector setup.") }
-            Label { text: "Daily database file modified: " + (root.monitor.lastUpdateEpoch ? new Date(root.monitor.lastUpdateEpoch * 1000).toLocaleString(Qt.locale(), Locale.ShortFormat) : "unknown") + " (not proof of a successful update)" }
-            Label { text: root.monitor.total + " logged detections; " + root.monitor.activeCount + " of the last ten paths currently visible to this user. Missing paths may be inaccessible, moved or removed." }
-            Repeater {
-              model: root.monitor.recent
-              Label {
-                required property var modelData
-                text: modelData.signature + "\n" + new Date(modelData.whenEpoch * 1000).toLocaleString(Qt.locale(), Locale.ShortFormat) + "\n" + modelData.path + "\n" + (modelData.present ? "Path still present" : "Path absent or inaccessible")
-                color: modelData.present ? Color.urgent : root.foreground
-              }
+            Card {
+              id: setupCard
+              Heading { text: "Setup" }
+              Label { text: "Install ClamAV with the Omarchy installer, then install / update the control helper. Both open a visible terminal." }
+              Label { text: "1. Install ClamAV, then 2. Install / update control helper.\n3. Settings: choose watched paths and Apply scanner / updater setup.\n4. Services: start updater, wait for databases, then daemon / scanner. Boot is optional; nothing starts automatically." }
+              Label { text: "ClamAV package: " + root.packageState }
+              Button { id: installButton; visible: root.packageState === "absent"; width: parent.width; text: "Install ClamAV"; focusable: true; hasCursor: root.cursorItems[root.cursor] === installButton; enabled: !packageInstallProc.running; onClicked: packageInstallProc.running = true }
+              Button { id: helperInstallButton; width: parent.width; text: "Install / update helper"; focusable: true; hasCursor: root.cursorItems[root.cursor] === helperInstallButton; enabled: !helperInstallProc.running; onClicked: helperInstallProc.running = true }
             }
-            Button { id: logButton; hasCursor: root.cursorItems[root.cursor] === logButton; width: parent.width; text: "Open detection log"; focusable: true; onClicked: { if (root.bar) root.bar.run("omarchy-launch-editor " + Util.shellQuote(Quickshell.env("HOME") + "/.local/state/omarchy/clamav-detections.log")) } }
+            Card {
+              id: historyCard
+              Heading { text: "Recent history" }
+              Label { text: root.historyStale ? "History unknown/stale; showing last available records." : (root.monitor.logReadable ? "Last ten logged detections, not a full-system scan. File presence is not a quarantine verdict." : "Detection log unreadable or absent; see README for optional collector setup.") }
+              Label { text: "Daily database file modified: " + (root.monitor.lastUpdateEpoch ? new Date(root.monitor.lastUpdateEpoch * 1000).toLocaleString(Qt.locale(), Locale.ShortFormat) : "unknown") + " (not proof of a successful update)" }
+              Label { text: root.monitor.total + " logged detections; " + root.monitor.activeCount + " of the last ten paths currently visible to this user. Missing paths may be inaccessible, moved or removed." }
+              Repeater {
+                model: root.monitor.recent
+                Column {
+                  id: historyRecord
+                  required property var modelData
+                  width: parent.width
+                  spacing: Style.space(4)
+                  Rectangle { width: parent.width; height: Style.space(1); color: Util.alpha(root.foreground, 0.12) }
+                  Heading { text: historyRecord.modelData.signature; color: !root.historyStale && historyRecord.modelData.present ? Color.urgent : root.foreground }
+                  Label { text: historyRecord.modelData.path }
+                  Label { text: new Date(historyRecord.modelData.whenEpoch * 1000).toLocaleString(Qt.locale(), Locale.ShortFormat) + " · " + (historyRecord.modelData.present ? "Path still present" : "Path absent or inaccessible") }
+                }
+              }
+              Button { id: logButton; hasCursor: root.cursorItems[root.cursor] === logButton; width: parent.width; text: "Open detection log"; focusable: true; onClicked: { if (root.bar) root.bar.run("omarchy-launch-editor " + Util.shellQuote(Quickshell.env("HOME") + "/.local/state/omarchy/clamav-detections.log")) } }
+            }
           } // End overview
           Column {
             id: servicesPage
             width: parent.width
             spacing: Style.space(8)
             visible: root.tab === "services"
-            Label { text: "Existing service policy may move or remove detected files. This plugin preserves that policy; if details are unknown, inspect the service before starting."; color: root.foreground }
-            Button { id: policyDetailsButton; width: parent.width; text: root.policyDetailsVisible ? "Hide policy details" : "Show policy details"; focusable: true; hasCursor: root.cursorItems[root.cursor] === policyDetailsButton; onClicked: root.policyDetailsVisible = !root.policyDetailsVisible }
-            Label { visible: root.policyDetailsVisible; text: "ExecStart: " + (root.stale ? "Unknown/stale; inspect systemctl cat clamav-clamonacc.service before starting." : (root.serviceState("scanner").policy || "Unknown; inspect systemctl cat clamav-clamonacc.service before starting.")); color: root.foreground }
-            Label { text: root.stale ? "Quarantine readiness unknown/stale" : (root.state.quarantine ? root.state.quarantine.message : "Update helper for quarantine preparation status.") }
-            Label { text: "Readiness may be unavailable without authentication because /root is private. Prepare checks the current policy again and only creates root:root 0700 /root/quarantine if missing. It never changes existing permissions or policy. Does not start services; later starting the existing --move policy can move detected files." }
-            Action { id: prepareQuarantine; text: "Prepare /root/quarantine (authenticate)"; visible: !root.state.quarantine || root.state.quarantine.state !== "ready"; onClicked: root.request(["prepare-quarantine"]) }
-            Label { visible: !!root.confirmation; text: root.confirmation; color: Color.urgent }
+            Label { visible: !!root.confirmation; text: root.confirmation; font.bold: true }
             Button { visible: !!root.confirmation; width: parent.width; text: "Confirm existing policy"; focusable: true; hasCursor: !root.confirmationCancel; onClicked: { root.confirmation = ""; root.request(root.pendingAction) } }
             Button { id: cancelButton; visible: !!root.confirmation; width: parent.width; text: "Cancel"; focusable: true; hasCursor: root.confirmationCancel; onClicked: root.confirmation = "" }
-            PanelSectionHeader { text: "SERVICES — RUNNING AND BOOT ARE SEPARATE"; foreground: root.foreground; fontFamily: root.fontFamily }
-            Label { text: "Daemon: " + (root.stale ? "unknown" : root.serviceState("daemon").active + " / " + root.serviceState("daemon").boot) + "\nSocket: " + (root.stale ? "unknown" : root.serviceState("socket").active + " / " + root.serviceState("socket").boot) }
-            Action { id: daemonStart; serviceKind: "daemon"; operation: "start"; text: "Start daemon + socket"; onClicked: root.serviceAction("daemon", "start") }
-            Action { id: daemonStop; serviceKind: "daemon"; operation: "stop"; text: "Stop scanner + socket + daemon"; onClicked: root.serviceAction("daemon", "stop") }
-            Action { id: daemonBoot; serviceKind: "daemon"; operation: "enable"; text: "Enable daemon + socket at boot"; onClicked: root.serviceAction("daemon", "enable") }
-            Action { id: daemonDisableBoot; serviceKind: "daemon"; operation: "disable"; text: "Disable scanner + daemon + socket at boot"; onClicked: root.serviceAction("daemon", "disable") }
-            Label { text: "Scanner: " + (root.stale ? "unknown" : root.serviceState("scanner").active + " / " + root.serviceState("scanner").boot) }
-            Label { text: root.stale ? "Diagnostics unavailable/stale" : "Scanner: " + (root.serviceState("scanner").diagnostic || "Update helper for diagnostics") + "\nDaemon: " + (root.serviceState("daemon").diagnostic || "unknown") + "\nUpdater: " + (root.serviceState("updater").diagnostic || "unknown") }
-            Action { id: scannerStart; serviceKind: "scanner"; operation: "start"; text: "Start on-access scanner + dependencies"; onClicked: root.serviceAction("scanner", "start") }
-            Action { id: scannerStop; serviceKind: "scanner"; operation: "stop"; text: "Stop on-access scanner (daemon/socket remain)"; onClicked: root.serviceAction("scanner", "stop") }
-            Action { id: scannerBoot; serviceKind: "scanner"; operation: root.bootAction("scanner"); text: root.bootAction("scanner") + " scanner at boot"; enabled: !root.stale && !root.busy && !root.confirmation && root.bootKnown("scanner"); onClicked: root.serviceAction("scanner", root.bootAction("scanner")) }
-            Label { text: "Updater: " + (root.stale ? "unknown" : root.serviceState("updater").active + " / " + root.serviceState("updater").boot) }
-            Action { id: updaterStart; serviceKind: "updater"; operation: "start"; text: "Start updater"; onClicked: root.serviceAction("updater", "start") }
-            Action { id: updaterStop; serviceKind: "updater"; operation: "stop"; text: "Stop updater"; onClicked: root.serviceAction("updater", "stop") }
-            Action { id: updaterBoot; serviceKind: "updater"; operation: root.bootAction("updater"); text: root.bootAction("updater") + " updater at boot"; enabled: !root.stale && !root.busy && !root.confirmation && root.bootKnown("updater"); onClicked: root.serviceAction("updater", root.bootAction("updater")) }
+            Card {
+              id: policyCard
+              Heading { text: "Policy & quarantine" }
+              Label { text: "Prepare /root/quarantine requires authentication." }
+              Label { text: "Existing service policy may move or remove detected files. This plugin preserves that policy; if details are unknown, inspect the service before starting."; color: root.foreground }
+              Button { id: policyDetailsButton; width: parent.width; text: root.policyDetailsVisible ? "Hide policy details" : "Show policy details"; focusable: true; hasCursor: root.cursorItems[root.cursor] === policyDetailsButton; onClicked: root.policyDetailsVisible = !root.policyDetailsVisible }
+              Label { visible: root.policyDetailsVisible; text: "ExecStart: " + (root.stale ? "Unknown/stale; inspect systemctl cat clamav-clamonacc.service before starting." : (root.serviceState("scanner").policy || "Unknown; inspect systemctl cat clamav-clamonacc.service before starting.")); color: root.foreground }
+              Label { text: root.stale ? "Quarantine readiness unknown/stale" : (root.state.quarantine ? root.state.quarantine.message : "Update helper for quarantine preparation status.") }
+              Label { text: "Readiness may be unavailable without authentication (/root is private). Prepare rechecks policy and creates only missing root:root 0700 /root/quarantine; existing permissions and policy stay unchanged. Does not start services." }
+              Action { id: prepareQuarantine; text: "Prepare quarantine"; visible: !root.state.quarantine || root.state.quarantine.state !== "ready"; onClicked: root.request(["prepare-quarantine"]) }
+            }
+            Card {
+              id: daemonCard
+              Heading { text: "Daemon & socket" }
+              ServiceStatus { kind: "daemon" }
+              Label { text: "Socket · " + (root.stale ? "unknown" : root.serviceState("socket").active + " · boot " + root.serviceState("socket").boot) }
+              Label { text: root.stale ? "Diagnostics unavailable/stale" : (root.serviceState("daemon").diagnostic || "Diagnostics unknown") }
+              Heading { text: "Runtime" }
+              Label { text: "Start includes socket; stop also stops scanner and socket." }
+              Actions {
+                Action { id: daemonStart; serviceKind: "daemon"; operation: "start"; text: "Start daemon"; onClicked: root.serviceAction("daemon", "start") }
+                Action { id: daemonStop; serviceKind: "daemon"; operation: "stop"; text: "Stop daemon"; onClicked: root.serviceAction("daemon", "stop") }
+              }
+              Heading { text: "At boot" }
+              Label { text: "Enable includes socket; disable also disables scanner and socket. Running services are unchanged." }
+              Actions {
+                Action { id: daemonBoot; serviceKind: "daemon"; operation: "enable"; text: "Enable at boot"; onClicked: root.serviceAction("daemon", "enable") }
+                Action { id: daemonDisableBoot; serviceKind: "daemon"; operation: "disable"; text: "Disable at boot"; onClicked: root.serviceAction("daemon", "disable") }
+              }
+            }
+            Card {
+              id: scannerCard
+              Heading { text: "On-access scanner" }
+              ServiceStatus { kind: "scanner" }
+              Label { text: root.stale ? "Diagnostics unavailable/stale" : (root.serviceState("scanner").diagnostic || "Update helper for diagnostics") }
+              Heading { text: "Runtime" }
+              Label { text: "Start includes daemon/socket dependencies; stop leaves daemon/socket running." }
+              Actions {
+                Action { id: scannerStart; serviceKind: "scanner"; operation: "start"; text: "Start scanner"; onClicked: root.serviceAction("scanner", "start") }
+                Action { id: scannerStop; serviceKind: "scanner"; operation: "stop"; text: "Stop scanner"; onClicked: root.serviceAction("scanner", "stop") }
+              }
+              Heading { text: "At boot" }
+              Actions {
+                Action { id: scannerBoot; serviceKind: "scanner"; operation: root.bootAction("scanner"); text: root.bootAction("scanner") + " scanner at boot"; enabled: !root.stale && !root.busy && !root.confirmation && root.bootKnown("scanner"); onClicked: root.serviceAction("scanner", root.bootAction("scanner")) }
+              }
+            }
+            Card {
+              id: updaterCard
+              Heading { text: "Signature updater" }
+              ServiceStatus { kind: "updater" }
+              Label { text: root.stale ? "Diagnostics unavailable/stale" : (root.serviceState("updater").diagnostic || "Diagnostics unknown") }
+              Heading { text: "Runtime" }
+              Actions {
+                Action { id: updaterStart; serviceKind: "updater"; operation: "start"; text: "Start updater"; onClicked: root.serviceAction("updater", "start") }
+                Action { id: updaterStop; serviceKind: "updater"; operation: "stop"; text: "Stop updater"; onClicked: root.serviceAction("updater", "stop") }
+              }
+              Heading { text: "At boot" }
+              Actions {
+                Action { id: updaterBoot; serviceKind: "updater"; operation: root.bootAction("updater"); text: root.bootAction("updater") + " updater at boot"; enabled: !root.stale && !root.busy && !root.confirmation && root.bootKnown("updater"); onClicked: root.serviceAction("updater", root.bootAction("updater")) }
+              }
+            }
           } // End services
           Column {
             id: settingsPage
             width: parent.width
             spacing: Style.space(8)
             visible: root.tab === "settings"
-            Button { id: reloadButton; hasCursor: root.cursorItems[root.cursor] === reloadButton; width: parent.width; text: "Reload fields (discard unsaved edits)"; focusable: true; enabled: !root.busy; onClicked: { root.scannerDirty = false; root.updaterDirty = false; root.loadFields() } }
-            PanelSectionHeader { text: "ON-ACCESS CONFIGURATION"; foreground: root.foreground; fontFamily: root.fontFamily }
-            Label { text: "Include/exclude: JSON arrays of existing absolute directories, e.g. [\"/home\"]. Apply saves only; stop scanner+daemon, then start daemon and scanner to use new settings. Backups remain next to the config." }
-            Label { text: "Authenticated Apply adds a validated non-root system daemon exclusion only when absent for that daemon; existing UID/Uname/root exclusions and quarantine policy are preserved. A root-only exclusion does not cover a non-root daemon. Missing User is set to the validated clamav default. It removes an active package Example directive after candidate validation. No services start automatically." }
-            Label { text: root.state.configs.scanner && root.state.configs.scanner.setup ? root.state.configs.scanner.setup.join("\n") : "Install / update control helper on Overview to load setup prerequisites." }
-            Label { text: "Include paths" }
-            TextField { id: includeField; property string revision: ""; width: parent.width; enabled: !!root.state.configs.scanner && !root.busy; onTextEdited: root.scannerDirty = true; Keys.onEscapePressed: keys.forceActiveFocus() }
-            Label { text: "Exclude paths" }
-            TextField { id: excludeField; width: parent.width; enabled: includeField.enabled; onTextEdited: root.scannerDirty = true; Keys.onEscapePressed: keys.forceActiveFocus() }
-            Label { text: "Maximum on-access size (bytes or K/M/G; 1 byte–4G)" }
-            TextField { id: sizeField; width: parent.width; enabled: includeField.enabled; onTextEdited: root.scannerDirty = true; Keys.onEscapePressed: keys.forceActiveFocus() }
-            Action { id: saveScanner; text: "Apply scanner setup / settings (authenticate)"; enabled: includeField.enabled && !root.stale && !root.confirmation; onClicked: root.save("scanner") }
-            Label { text: root.state.configs.updater && root.state.configs.updater.setup ? root.state.configs.updater.setup.join("\n") : "" }
-            Label { text: "freshclam checks per day (1–50). Apply also completes package Example setup. Restart updater after applying; initial database downloads may take time. Start scanner only after databases are ready." }
-            TextField { id: checksField; property string revision: ""; width: parent.width; enabled: !!root.state.configs.updater && !root.busy; onTextEdited: root.updaterDirty = true; Keys.onEscapePressed: keys.forceActiveFocus() }
-            Action { id: saveUpdater; text: "Apply update frequency (authenticate)"; enabled: checksField.enabled && !root.stale && !root.confirmation; onClicked: root.save("updater") }
+            Label { text: "Reload discards unsaved edits." }
+            Button { id: reloadButton; hasCursor: root.cursorItems[root.cursor] === reloadButton; width: parent.width; text: "Reload fields"; focusable: true; enabled: !root.busy; onClicked: { root.scannerDirty = false; root.updaterDirty = false; root.loadFields() } }
+            Card {
+              id: scannerSettingsCard
+              Heading { text: "Scanner settings" }
+              Label { text: "Apply requires authentication and saves configuration only." }
+              Label { text: "Include/exclude: JSON arrays of existing absolute directories, e.g. [\"/home\"]. Apply saves only; stop scanner+daemon, then start daemon and scanner to use new settings. Backups remain next to the config." }
+              Label { text: "Apply adds a validated daemon exclusion only when absent; existing UID/Uname/root exclusions and quarantine policy stay unchanged. Root-only exclusions do not cover a non-root daemon. Missing User uses the validated clamav default; package Example is removed after validation. No services start." }
+              Label { text: root.state.configs.scanner && root.state.configs.scanner.setup ? root.state.configs.scanner.setup.join("\n") : "Install / update control helper on Overview to load setup prerequisites." }
+              Label { text: "Include paths" }
+              TextField { id: includeField; property string revision: ""; width: parent.width; enabled: !!root.state.configs.scanner && !root.busy; onTextEdited: root.scannerDirty = true; Keys.onEscapePressed: keys.forceActiveFocus() }
+              Label { text: "Exclude paths" }
+              TextField { id: excludeField; width: parent.width; enabled: includeField.enabled; onTextEdited: root.scannerDirty = true; Keys.onEscapePressed: keys.forceActiveFocus() }
+              Label { text: "Maximum on-access size (bytes or K/M/G; 1 byte–4G)" }
+              TextField { id: sizeField; width: parent.width; enabled: includeField.enabled; onTextEdited: root.scannerDirty = true; Keys.onEscapePressed: keys.forceActiveFocus() }
+              Action { id: saveScanner; text: "Apply scanner settings"; enabled: includeField.enabled && !root.stale && !root.confirmation; onClicked: root.save("scanner") }
+            }
+            Card {
+              id: updaterSettingsCard
+              Heading { text: "Signature updates" }
+              Label { text: "Apply requires authentication and saves configuration only." }
+              Label { text: root.state.configs.updater && root.state.configs.updater.setup ? root.state.configs.updater.setup.join("\n") : "" }
+              Heading { text: "Checks per day (1–50)" }
+              Label { text: "Apply completes package Example setup. Restart updater afterward; wait for initial databases before starting scanner." }
+              TextField { id: checksField; property string revision: ""; width: parent.width; enabled: !!root.state.configs.updater && !root.busy; onTextEdited: root.updaterDirty = true; Keys.onEscapePressed: keys.forceActiveFocus() }
+              Action { id: saveUpdater; text: "Apply update frequency"; enabled: checksField.enabled && !root.stale && !root.confirmation; onClicked: root.save("updater") }
+            }
           } // End settings
         }
       }
